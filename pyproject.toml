@@ -1,0 +1,60 @@
+[project]
+name = "framesmoothie"
+version = "0.1.0"
+description = ""
+authors = [
+    {name = "윤병익",email = "yeun0908@gmail.com"}
+]
+requires-python = ">=3.12, <3.14"
+
+[tool.poetry]
+requires-poetry = ">=2.0"
+packages = [{include = "framesmoothie", from = "src"}]
+
+[[tool.poetry.source]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+priority = "explicit"
+
+
+[[tool.poetry.source]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+priority = "explicit"
+
+
+[[tool.poetry.source]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+priority = "explicit"
+
+
+[[tool.poetry.source]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+priority = "explicit"
+
+
+[tool.poetry.dependencies]  
+torch = [
+    {source = "pytorch-cpu", markers = "extra=='cpu' and extra!='cu126' and extra!='cu128' and extra!='cu130'"},
+    {source = "pytorch-cu126", markers = "extra!='cpu' and extra=='cu126' and extra!='cu128' and extra!='cu130'"},
+    {source = "pytorch-cu128", markers = "extra!='cpu' and extra!='cu126' and extra=='cu128' and extra!='cu130'"},
+    {source = "pytorch-cu130", markers = "extra!='cpu' and extra!='cu126' and extra!='cu128' and extra=='cu130'"}
+]
+s9 = [
+    {git = "https://github.com/Honey-Be/s9.git", rev = "v0.2.4", extras = ["cpu"], markers = "extra=='cpu' and extra!='cu126' and extra!='cu128' and extra!='cu130'"},
+    {git = "https://github.com/Honey-Be/s9.git", rev = "v0.2.4", extras = ["cu126"], markers = "extra!='cpu' and extra=='cu126' and extra!='cu128' and extra!='cu130'"},
+    {git = "https://github.com/Honey-Be/s9.git", rev = "v0.2.4", extras = ["cu128"], markers = "extra!='cpu' and extra!='cu126' and extra=='cu128' and extra!='cu130'"},
+    {git = "https://github.com/Honey-Be/s9.git", rev = "v0.2.4", extras = ["cu130"], markers = "extra!='cpu' and extra!='cu126' and extra!='cu128' and extra=='cu130'"}
+]
+
+[tool.poetry.extras]
+cpu = ["torch", "s9"]
+cu126 = ["torch", "s9"]
+cu128 = ["torch", "s9"]
+cu130 = ["torch", "s9"]
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
