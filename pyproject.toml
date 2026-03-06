@@ -43,11 +43,12 @@ torch = [
     {source = "pytorch-cu130", markers = "extra!='cpu' and extra!='cu126' and extra!='cu128' and extra=='cu130'"}
 ]
 s9 = [
-    {git = "https://github.com/Honey-Be/s9.git", rev = "v0.2.4", extras = ["cpu"], markers = "extra=='cpu' and extra!='cu126' and extra!='cu128' and extra!='cu130'"},
-    {git = "https://github.com/Honey-Be/s9.git", rev = "v0.2.4", extras = ["cu126"], markers = "extra!='cpu' and extra=='cu126' and extra!='cu128' and extra!='cu130'"},
-    {git = "https://github.com/Honey-Be/s9.git", rev = "v0.2.4", extras = ["cu128"], markers = "extra!='cpu' and extra!='cu126' and extra=='cu128' and extra!='cu130'"},
-    {git = "https://github.com/Honey-Be/s9.git", rev = "v0.2.4", extras = ["cu130"], markers = "extra!='cpu' and extra!='cu126' and extra!='cu128' and extra=='cu130'"}
+    {git = "https://github.com/Honey-Be/s9.git", rev = "v0.2.6", extras = ["cpu"], markers = "extra=='cpu' and extra!='cu126' and extra!='cu128' and extra!='cu130'"},
+    {git = "https://github.com/Honey-Be/s9.git", rev = "v0.2.6", extras = ["cu126"], markers = "extra!='cpu' and extra=='cu126' and extra!='cu128' and extra!='cu130'"},
+    {git = "https://github.com/Honey-Be/s9.git", rev = "v0.2.6", extras = ["cu128"], markers = "extra!='cpu' and extra!='cu126' and extra=='cu128' and extra!='cu130'"},
+    {git = "https://github.com/Honey-Be/s9.git", rev = "v0.2.6", extras = ["cu130"], markers = "extra!='cpu' and extra!='cu126' and extra!='cu128' and extra=='cu130'"}
 ]
+numpy = "^2.4.2"
 
 [tool.poetry.extras]
 cpu = ["torch", "s9"]

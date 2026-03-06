@@ -4,6 +4,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from s9.rs9_modules import RS9Layer
 from s9.base import FPDTypeIdx, get_float_dtype
+from s9.activations.real.hglu import HGLU
 
 try:
     # Python 3.12+
@@ -167,7 +168,7 @@ class RS9CondMixBlock(nn.Module):
         self.ln = nn.LayerNorm(self.v_dim, dtype=self.dtype)
         self.ffn = nn.Sequential(
             nn.Linear(self.v_dim, ffn_mult * self.v_dim, dtype=self.dtype),
-            nn.GELU(),
+            HGLU(4.0),
             nn.Dropout(dropout),
             nn.Linear(ffn_mult * self.v_dim, q_dim, dtype=self.dtype),
             nn.Dropout(dropout),
