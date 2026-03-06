@@ -4,7 +4,8 @@ from typing import Optional, Dict, Any, List
 
 from framesmoothie.blocks import RS9CondMixBlock
 from s9.activations.real.hglu import HGLU
-
+from s9.rs9_modules import RS9Layer
+from s9.base import FPDTypeIdx
 
 class RS9DecoderLayer(nn.Module):
     """
@@ -26,9 +27,9 @@ class RS9DecoderLayer(nn.Module):
         eps: float = 1e-6,
         rs9_eps: float = 1e-6,
         return_masks: bool = True,
-        rs9=None,
-        gen_activation=None,
-        dtype_idx=64,
+        rs9: Optional[RS9Layer] = None,
+        gen_activation: Callable[[int, float, FPDTypeIdx], StabilizedActivationFunctionBase] = BiasedTeLU,
+        dtype_idx: FPDTypeIdx = 64,
         lambda_gate_entropy: float = 0.0,
         lambda_gate_competition: float = 0.0,
         # extra slot FFN (post)
