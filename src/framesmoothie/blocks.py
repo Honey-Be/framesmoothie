@@ -15,6 +15,7 @@ except Exception:  # pragma: no cover
 
 from framesmoothie.base import StabilizedActivationFunctionBase, auxloss
 from framesmoothie.activations import BiasedTeLU
+from framesmoothie.adapters.base import ModuleAdapterBase
 
 
 def _to_channel_first(x: torch.Tensor) -> torch.Tensor:
@@ -138,6 +139,7 @@ class RS9CondMixBlock(nn.Module):
         dtype_idx: FPDTypeIdx = 64,
         lambda_gate_entropy: float = 0.0,
         lambda_gate_competition: float = 0.0,
+        adapter: Optional[ModuleAdapterBase] = None,
     ):
         super().__init__()
         self.rs9: RS9Layer = rs9 if rs9 is not None else RS9Layer(
@@ -154,6 +156,7 @@ class RS9CondMixBlock(nn.Module):
         self.v_dim: int = v_dim if v_dim is not None else q_dim
         self.eps: float = eps
         self.return_masks: bool = return_masks
+        self.adapter: Optional[ModuleAdapterBase] = adapter
         self.dtype: torch.dtype = get_float_dtype(dtype_idx)
 
         # Gate from X and Q
@@ -173,6 +176,18 @@ class RS9CondMixBlock(nn.Module):
             nn.Linear(ffn_mult * self.v_dim, q_dim, dtype=self.dtype),
             nn.Dropout(dropout),
         )
+
+        # Adapter hooks (optional): adapt selected Linear layers
+        if self.adapter is not None:
+            self.gate.wx = self.adapter.wrap_linear(self.gate.wx)
+            self.gate.wq = self.adapter.wrap_linear(self.gate.wq)
+
+            self.vx = self.adapter.wrap_linear(self.vx)
+            self.vh = self.adapter.wrap_linear(self.vh)
+            self.film.proj = self.adapter.wrap_linear(self.film.proj)
+
+            self.ffn[0] = self.adapter.wrap_linear(self.ffn[0])
+            self.ffn[3] = self.adapter.wrap_linear(self.ffn[3])
 
         self._reg_loss: torch.Tensor = torch.tensor(0.0, dtype = self.dtype)
         self.lambda_gate_entropy: float = lambda_gate_entropy

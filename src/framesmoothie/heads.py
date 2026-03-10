@@ -3,6 +3,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import List, Optional, Tuple, Union, Dict
 
+from framesmoothie.adapters.base import ModuleAdapterBase
+
 from s9.base import FPDTypeIdx, get_float_dtype
 from s9.activations.real.hglu import HGLU
 
@@ -142,6 +144,7 @@ class RS9InstanceHead(nn.Module):
         gate_fuse: float = 0.0,
         normalize_embeddings: bool = True,
         with_scores: bool = True,
+        adapter: Optional[ModuleAdapterBase] = None
     ):
         super().__init__()
         self.dtype = get_float_dtype(dtype_idx)
@@ -149,6 +152,8 @@ class RS9InstanceHead(nn.Module):
         self.gate_fuse = float(gate_fuse)
         self.normalize_embeddings = bool(normalize_embeddings)
         self.with_scores = bool(with_scores)
+
+        self.adapter: Optional[ModuleAdapterBase] = adapter
 
         self.act = HGLU(4.0)
 
@@ -168,6 +173,16 @@ class RS9InstanceHead(nn.Module):
 
         self.pixel_proj = nn.Linear(c_model, mask_dim, bias=False, dtype=self.dtype)
         self.slot_proj = nn.Linear(q_dim, mask_dim, bias=False, dtype=self.dtype)
+
+        # Adapter hooks (optional)
+        if self.adapter is not None:
+            self.cls_fc1 = self.adapter.wrap_linear(self.cls_fc1)
+            self.cls_fc2 = self.adapter.wrap_linear(self.cls_fc2)
+            if self.with_scores:
+                self.score_fc1 = self.adapter.wrap_linear(self.score_fc1)
+                self.score_fc2 = self.adapter.wrap_linear(self.score_fc2)
+            self.pixel_proj = self.adapter.wrap_linear(self.pixel_proj)
+            self.slot_proj = self.adapter.wrap_linear(self.slot_proj)
 
     def forward(
         self,

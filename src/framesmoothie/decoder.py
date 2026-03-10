@@ -1,8 +1,11 @@
 import torch
 import torch.nn as nn
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Callable
 
 from framesmoothie.blocks import RS9CondMixBlock
+from framesmoothie.base import StabilizedActivationFunctionBase
+from framesmoothie.activations import BiasedTeLU
+from framesmoothie.adapters.base import ModuleAdapterBase
 from s9.activations.real.hglu import HGLU
 from s9.rs9_modules import RS9Layer
 from s9.base import FPDTypeIdx
@@ -32,6 +35,8 @@ class RS9DecoderLayer(nn.Module):
         dtype_idx: FPDTypeIdx = 64,
         lambda_gate_entropy: float = 0.0,
         lambda_gate_competition: float = 0.0,
+        # adapter
+        adapter: Optional[ModuleAdapterBase] = None,
         # extra slot FFN (post)
         post_ffn: bool = True,
         post_ffn_mult: int = 4,
@@ -54,12 +59,11 @@ class RS9DecoderLayer(nn.Module):
             dtype_idx=dtype_idx,
             lambda_gate_entropy=lambda_gate_entropy,
             lambda_gate_competition=lambda_gate_competition,
+            adapter=adapter
         )
 
         self.post_ffn_enabled = post_ffn
         if post_ffn:
-            # Slot-wise FFN on q: [B,K,Dq] -> [B,K,Dq]
-            # Note: LayerNorm supports (B,K,D) with normalized_shape=D
             self.q_ln = nn.LayerNorm(q_dim)
             self.q_ffn = nn.Sequential(
                 nn.Linear(q_dim, post_ffn_mult * q_dim),
