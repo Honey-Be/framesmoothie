@@ -15,6 +15,7 @@ except Exception:  # pragma: no cover
 
 from framesmoothie.base import StabilizedActivationFunctionBase, auxloss
 from framesmoothie.activations import BiasedTeLU
+from framesmoothie.fmlm import FMLMFiLM
 from framesmoothie.adapters.base import ModuleAdapterBase
 
 
@@ -165,7 +166,8 @@ class RS9CondMixBlock(nn.Module):
         # Values: project X and H into v_dim, apply FiLM(H) conditioned on Q, then sum with X
         self.vx = nn.Linear(c_model, self.v_dim, bias=False, dtype=self.dtype)
         self.vh = nn.Linear(c_model, self.v_dim, bias=False, dtype=self.dtype)
-        self.film = Film(q_dim=q_dim, d=self.v_dim, dtype=self.dtype)
+        ctx_dim = getattr(adapter, 'ctx_dim', None) if adapter is not None else None
+        self.film = FMLMFiLM(q_dim=q_dim, d=self.v_dim, ctx_dim=ctx_dim, rank=8, eta=0.1, alpha=0.1, dtype_idx=dtype_idx)
 
         # Query update: LN + FFN
         self.ln = nn.LayerNorm(self.v_dim, dtype=self.dtype)
@@ -179,15 +181,15 @@ class RS9CondMixBlock(nn.Module):
 
         # Adapter hooks (optional): adapt selected Linear layers
         if self.adapter is not None:
-            self.gate.wx = self.adapter.wrap_linear(self.gate.wx)
-            self.gate.wq = self.adapter.wrap_linear(self.gate.wq)
+            # instance branch
+            self.gate.wx = self.adapter.wrap_linear(self.gate.wx, task="instance")
+            self.gate.wq = self.adapter.wrap_linear(self.gate.wq, task="instance")
 
-            self.vx = self.adapter.wrap_linear(self.vx)
-            self.vh = self.adapter.wrap_linear(self.vh)
-            self.film.proj = self.adapter.wrap_linear(self.film.proj)
+            self.vx = self.adapter.wrap_linear(self.vx, task="instance")
+            self.vh = self.adapter.wrap_linear(self.vh, task="instance")
 
-            self.ffn[0] = self.adapter.wrap_linear(self.ffn[0])
-            self.ffn[3] = self.adapter.wrap_linear(self.ffn[3])
+            self.ffn[0] = self.adapter.wrap_linear(self.ffn[0], task="instance")
+            self.ffn[3] = self.adapter.wrap_linear(self.ffn[3], task="instance")
 
         self._reg_loss: torch.Tensor = torch.tensor(0.0, dtype = self.dtype)
         self.lambda_gate_entropy: float = lambda_gate_entropy
@@ -235,7 +237,8 @@ class RS9CondMixBlock(nn.Module):
         # 4) values
         vx = self.vx(x_flat)                    # [B,N,V]
         vh = self.vh(h_flat)                    # [B,N,V]
-        vh_film = self.film(q, vh)              # [B,K,N,V]
+        ctx = self.adapter.hub.get_context() if (self.adapter is not None and hasattr(self.adapter, 'hub')) else None
+        vh_film = self.film(q, vh, ctx=ctx)              # [B,K,N,V]
         # Note: avoid materializing Y=[B,K,N,C]; use values V=[B,K,N,V]
         v = vx.unsqueeze(1) + vh_film           # [B,K,N,V]
 

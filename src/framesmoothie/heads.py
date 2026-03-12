@@ -176,13 +176,13 @@ class RS9InstanceHead(nn.Module):
 
         # Adapter hooks (optional)
         if self.adapter is not None:
-            self.cls_fc1 = self.adapter.wrap_linear(self.cls_fc1)
-            self.cls_fc2 = self.adapter.wrap_linear(self.cls_fc2)
+            self.cls_fc1 = self.adapter.wrap_linear(self.cls_fc1, task="instance")
+            self.cls_fc2 = self.adapter.wrap_linear(self.cls_fc2, task="instance")
             if self.with_scores:
-                self.score_fc1 = self.adapter.wrap_linear(self.score_fc1)
-                self.score_fc2 = self.adapter.wrap_linear(self.score_fc2)
-            self.pixel_proj = self.adapter.wrap_linear(self.pixel_proj)
-            self.slot_proj = self.adapter.wrap_linear(self.slot_proj)
+                self.score_fc1 = self.adapter.wrap_linear(self.score_fc1, task="instance")
+                self.score_fc2 = self.adapter.wrap_linear(self.score_fc2, task="instance")
+            self.pixel_proj = self.adapter.wrap_linear(self.pixel_proj, task="instance")
+            self.slot_proj = self.adapter.wrap_linear(self.slot_proj, task="instance")
 
     def forward(
         self,

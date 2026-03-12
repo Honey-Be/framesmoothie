@@ -9,6 +9,8 @@ from framesmoothie.heads import SemanticFPNHead, RS9InstanceHead
 from framesmoothie.decoder import RS9Decoder, RS9DecoderLayer
 from framesmoothie.panoptic import panoptic_fusion
 from framesmoothie.hmc import HMCCalibrator
+from framesmoothie.adapters.base import ModuleAdapterBase
+from framesmoothie.adapters.lrca import LRCAAdapter
 
 from s9.base import FPDTypeIdx, get_float_dtype
 from s9.rs9_modules import RS9Layer
@@ -174,7 +176,18 @@ class FrameSmoothiePanopticModel(nn.Module):
         # gate fusion in head
         gate_fuse: float = 0.0,
         # aux-loss aggregation
-        aux_weight_default: float = 1.0,
+                aux_weight_default: float = 1.0,
+        # LRCA adapter (optional)
+        use_lrca: bool = False,
+        adapter: Optional[ModuleAdapterBase] = None,
+        lrca_rank_shared: int = 8,
+        lrca_rank_private: int = 4,
+        lrca_fmlm_rank: int = 8,
+        lrca_fmlm_eta: float = 0.1,
+        lrca_domain_dim: int = 1,
+        lrca_task_id_dim: int = 1,
+        return_diag_default: bool = False,
+
     ):
         super().__init__()
         self.dtype = get_float_dtype(dtype_idx)
@@ -182,6 +195,12 @@ class FrameSmoothiePanopticModel(nn.Module):
         self.spatial_dims = spatial_dims
         self.instance_level = int(instance_level)
         self.aux_weight_default = float(aux_weight_default)
+        self.return_diag_default = bool(return_diag_default)
+        self.adapter: Optional[ModuleAdapterBase] = adapter
+        if use_lrca and self.adapter is None:
+            # context = GAP(real_feature) ⊕ domain_id
+            ctx_dim = int(c_model + lrca_domain_dim)
+            self.adapter = LRCAAdapter(ctx_dim=ctx_dim, task_id_dim=lrca_task_id_dim, rank_shared=lrca_rank_shared, rank_private=lrca_rank_private, fmlm_rank=lrca_fmlm_rank, fmlm_eta=lrca_fmlm_eta, dtype_idx=dtype_idx)
 
         self.T = transform_fwd
         self.T_inv = transform_inv if transform_inv is not None else infer_inverse_transform(transform_fwd)
@@ -218,6 +237,7 @@ class FrameSmoothiePanopticModel(nn.Module):
                 dtype_idx=dtype_idx,
                 lambda_gate_entropy=lambda_gate_entropy,
                 lambda_gate_competition=lambda_gate_competition,
+                    adapter=self.adapter,
                 post_ffn=True,
             ))
         self.decoder = RS9Decoder(layers)
@@ -232,6 +252,7 @@ class FrameSmoothiePanopticModel(nn.Module):
             gate_fuse=gate_fuse,
             normalize_embeddings=True,
             with_scores=True,
+                adapter=self.adapter,
         )
 
         self.query_embed = nn.Parameter(torch.randn(num_queries, q_dim, dtype=self.dtype))
@@ -291,7 +312,9 @@ class FrameSmoothiePanopticModel(nn.Module):
         x_real_cf: torch.Tensor,
         *,
         q0: Optional[torch.Tensor] = None,
+        domain_id: Optional[torch.Tensor] = None,
         return_panoptic: bool = False,
+        return_diag: Optional[bool] = None,
         panoptic_cfg: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         # 1) real -> complex
@@ -300,6 +323,19 @@ class FrameSmoothiePanopticModel(nn.Module):
         zL = self.encoder(z0)               # [B,C,*S] complex
         # 3) complex -> real via T^{-1}
         x_dec_cf = self.T_inv(zL)           # [B,C,*S] real
+
+        # adapter context (for LRCA gates / FMLM FiLM)
+        if self.adapter is not None:
+            B = x_dec_cf.shape[0]
+            # GAP over spatial dims -> [B,C]
+            gap = x_dec_cf.flatten(2).mean(dim=-1)  # [B,C]
+            if domain_id is None:
+                d = torch.zeros((B, 1), dtype=gap.dtype, device=gap.device)
+            else:
+                d = domain_id.reshape(B, -1).to(dtype=gap.dtype, device=gap.device)
+            ctx = torch.cat([gap, d], dim=-1)
+            self.adapter.set_context(ctx)
+
 
         # 4) pyramid in real domain
         pyr_cl = self._make_pyramid(x_dec_cf)  # list of [B,*S_i,C]
@@ -338,6 +374,11 @@ class FrameSmoothiePanopticModel(nn.Module):
             inst["mask_logits_up"] = inst["mask_logits"]
 
         out: Dict[str, Any] = {"sem_logits": sem_logits, "inst": inst, "pyr": pyr_cl}
+
+        rd = self.return_diag_default if return_diag is None else bool(return_diag)
+        if rd and self.adapter is not None:
+            out["diag"] = self.adapter.hub.get_diagnostics()
+
 
         if return_panoptic:
             cfg = panoptic_cfg or {}
