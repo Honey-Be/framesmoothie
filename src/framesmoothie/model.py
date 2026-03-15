@@ -11,6 +11,9 @@ from framesmoothie.panoptic import panoptic_fusion
 from framesmoothie.hmc import HMCCalibrator
 from framesmoothie.adapters.base import ModuleAdapterBase
 from framesmoothie.adapters.lrca import LRCAAdapter
+from framesmoothie.specs import PreBridgeMapSpec, resolve_pre_bridge_map
+from framesmoothie.zoning import PreBridgeProjector, DualViewZoningBlock
+from framesmoothie.predictor import ZonePredictiveGraph, ZoneEdgeSpec
 
 from s9.base import FPDTypeIdx, get_float_dtype
 from s9.rs9_modules import RS9Layer
@@ -187,6 +190,17 @@ class FrameSmoothiePanopticModel(nn.Module):
         lrca_domain_dim: int = 1,
         lrca_task_id_dim: int = 1,
         return_diag_default: bool = False,
+        # pre-bridge projector (optional)
+        pre_bridge_map: Optional[str | PreBridgeMapSpec] = None,
+        pre_bridge_channels: Optional[int] = None,
+        # dual-view zoning (optional)
+        use_zoning: bool = False,
+        zone_names: tuple[str, ...] = ("content", "structure", "label", "boundary"),
+        semantic_zone_names: tuple[str, ...] = ("content", "structure", "boundary"),
+        instance_zone_names: tuple[str, ...] = ("content", "label", "boundary"),
+        # zone-wise predictive loss (optional)
+        use_zone_prediction: bool = False,
+        zone_pred_edges: tuple[ZoneEdgeSpec | tuple[tuple[str, ...], str] | tuple[tuple[str, ...], str, float], ...] = ((("structure",), "boundary"), (("content", "structure"), "label")),
 
     ):
         super().__init__()
@@ -206,6 +220,51 @@ class FrameSmoothiePanopticModel(nn.Module):
         self.T_inv = transform_inv if transform_inv is not None else infer_inverse_transform(transform_fwd)
 
         self.encoder = encoder if encoder is not None else LazyS9Stack(c_model=c_model, depth=4, eps=eps, dtype_idx=dtype_idx)
+
+        # Optional pre-bridge realification of zL for future dual-view zoning
+        self.pre_bridge_map = resolve_pre_bridge_map(pre_bridge_map)
+        self.pre_bridge_channels = int(pre_bridge_channels) if pre_bridge_channels is not None else int(c_model)
+        self.pre_bridge_projector: Optional[PreBridgeProjector]
+        if self.pre_bridge_map is not None:
+            self.pre_bridge_projector = PreBridgeProjector(
+                map_spec=self.pre_bridge_map,
+                in_channels=c_model,
+                out_channels=self.pre_bridge_channels,
+                spatial_dims=spatial_dims,
+                dtype_idx=dtype_idx,
+            )
+        else:
+            self.pre_bridge_projector = None
+
+        self.use_zoning = bool(use_zoning)
+        if self.use_zoning:
+            if self.pre_bridge_projector is None:
+                raise ValueError("use_zoning=True requires a pre_bridge_map / pre_bridge_projector.")
+            self.zoning_block = DualViewZoningBlock(
+                num_scales=self.num_pyr_levels,
+                c_pre=self.pre_bridge_channels,
+                c_post=c_model,
+                c_out=c_model,
+                zone_names=zone_names,
+                semantic_zone_names=semantic_zone_names,
+                instance_zone_names=instance_zone_names,
+                dtype_idx=dtype_idx,
+            )
+        else:
+            self.zoning_block = None
+
+        self.use_zone_prediction = bool(use_zone_prediction)
+        if self.use_zone_prediction:
+            if not self.use_zoning:
+                raise ValueError("use_zone_prediction=True requires use_zoning=True.")
+            self.zone_predictor = ZonePredictiveGraph(
+                num_scales=self.num_pyr_levels,
+                c_model=c_model,
+                edge_specs=zone_pred_edges,
+                dtype_idx=dtype_idx,
+            )
+        else:
+            self.zone_predictor = None
 
         # build pyramid levels by pooling in real domain
         self.num_pyr_levels = 4  # 1,2,4,8
@@ -337,13 +396,35 @@ class FrameSmoothiePanopticModel(nn.Module):
             self.adapter.set_context(ctx)
 
 
-        # 4) pyramid in real domain
+        # 4) pyramids
+        pre_pyr_cl = None
+        if self.pre_bridge_projector is not None:
+            pre0_cf = self.pre_bridge_projector(zL)   # [B,C_pre,*S] real
+            pre_pyr_cl = self._make_pyramid(pre0_cf)  # list of [B,*S_i,C_pre]
+
         pyr_cl = self._make_pyramid(x_dec_cf)  # list of [B,*S_i,C]
-        sem_logits = self.semantic_head(pyr_cl)  # [B,C_sem,*S0] (channel-first)
+
+        zone_out = None
+        sem_pyr_cl = pyr_cl
+        inst_pyr_cl = pyr_cl
+        if self.zoning_block is not None:
+            if pre_pyr_cl is None:
+                raise RuntimeError("zoning_block requires pre_pyr_cl, but pre_pyr_cl is None")
+            zone_out = self.zoning_block(pre_pyr_cl, pyr_cl)
+            sem_pyr_cl = zone_out["sem_pyr"]
+            inst_pyr_cl = zone_out["inst_pyr"]
+
+        zone_pred = None
+        if self.zone_predictor is not None:
+            if zone_out is None:
+                raise RuntimeError("zone_predictor requires zone_out, but zone_out is None")
+            zone_pred = self.zone_predictor(zone_out["zones"])
+
+        sem_logits = self.semantic_head(sem_pyr_cl)  # [B,C_sem,*S0] (channel-first)
 
         # instance branch feature level
-        lvl = max(0, min(self.instance_level, len(pyr_cl) - 1))
-        x_inst_cl = pyr_cl[lvl]
+        lvl = max(0, min(self.instance_level, len(inst_pyr_cl) - 1))
+        x_inst_cl = inst_pyr_cl[lvl]
         spatial_inst = tuple(x_inst_cl.shape[1:-1])
 
         # init queries
@@ -373,7 +454,13 @@ class FrameSmoothiePanopticModel(nn.Module):
         else:
             inst["mask_logits_up"] = inst["mask_logits"]
 
-        out: Dict[str, Any] = {"sem_logits": sem_logits, "inst": inst, "pyr": pyr_cl}
+        out: Dict[str, Any] = {"sem_logits": sem_logits, "inst": inst, "pyr": pyr_cl, "pre_pyr": pre_pyr_cl, "zones": zone_out, "zone_pred": zone_pred}
+
+        # Surface highest-resolution boundary zone for HMC.
+        if isinstance(zone_out, dict) and "zones" in zone_out and len(zone_out["zones"]) > 0:
+            z0 = zone_out["zones"][0]
+            if isinstance(z0, dict) and "boundary" in z0:
+                out["boundary_features"] = z0["boundary"]
 
         rd = self.return_diag_default if return_diag is None else bool(return_diag)
         if rd and self.adapter is not None:

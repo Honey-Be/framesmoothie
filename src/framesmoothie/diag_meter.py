@@ -173,3 +173,29 @@ class DiagMeter:
         for k, st in self._stats.items():
             out[k] = float(st.mean().detach().cpu().item())
         return out
+
+    def compute_filtered(self, *, prefix: str = "") -> Dict[str, Dict[str, torch.Tensor]]:
+        """Compute only metrics whose keys start with `prefix`."""
+        if prefix == "":
+            return self.compute()
+        out: Dict[str, Dict[str, torch.Tensor]] = {}
+        for k, st in self._stats.items():
+            if not k.startswith(prefix):
+                continue
+            out[k] = {
+                "mean": st.mean().detach().cpu(),
+                "std": st.std().detach().cpu(),
+                "count": st.count.detach().cpu(),
+            }
+        return out
+
+    def compute_means_filtered(self, *, prefix: str = "") -> Dict[str, float]:
+        """Compute only mean values for keys whose names start with `prefix`."""
+        if prefix == "":
+            return self.compute_means()
+        out: Dict[str, float] = {}
+        for k, st in self._stats.items():
+            if not k.startswith(prefix):
+                continue
+            out[k] = float(st.mean().detach().cpu().item())
+        return out

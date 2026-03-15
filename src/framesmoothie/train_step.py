@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from framesmoothie.matcher import SetCriterion
 from framesmoothie.hmc import HMCCalibrator
 from framesmoothie.diag_meter import DiagMeter
+from framesmoothie.zone_losses import compute_zone_predictive_loss
 
 
 def _resize_targets_masks(
@@ -81,6 +82,9 @@ class FrameSmoothieTrainStep:
         pseudo_sem_conf_thresh: float = 0.7,
         panoptic_cfg: Optional[Dict[str, Any]] = None,
         corr_ema_beta: float = 0.99,
+        lambda_pred: float = 0.1,
+        pred_detach_target: bool = True,
+        use_edge_weights: bool = True,
     ):
         self.criterion_inst = criterion_inst
         self.hmc = hmc
@@ -91,6 +95,9 @@ class FrameSmoothieTrainStep:
         self.pseudo_sem_conf_thresh = float(pseudo_sem_conf_thresh)
         self.panoptic_cfg = panoptic_cfg or {}
         self.corr_ema_beta = float(corr_ema_beta)
+        self.lambda_pred = float(lambda_pred)
+        self.pred_detach_target = bool(pred_detach_target)
+        self.use_edge_weights = bool(use_edge_weights)
         self._src_corr_ema: Optional[torch.Tensor] = None  # CPU scalar
 
     @staticmethod
@@ -160,6 +167,7 @@ class FrameSmoothieTrainStep:
                 inst_class_logits=inst_t["class_logits"],
                 inst_mask_logits=inst_t["mask_logits_up"],
                 inst_scores=inst_t.get("scores", None),
+                boundary_features=out_t_teacher.get("boundary_features", None),
             )
 
         # student forward on target for pseudo losses
@@ -205,14 +213,29 @@ class FrameSmoothieTrainStep:
             {"class_logits": inst_ts["class_logits"], "mask_logits": inst_ts["mask_logits"]},
             targets_inst_t,
         )
+
         inst_loss_t = inst_losses_t["main_loss"]
+
+        # -------- zone-wise predictive loss (L_pred) --------
+        pred_loss_s, pred_loss_s_dict = compute_zone_predictive_loss(
+            zone_pred=out_s.get("zone_pred", None),
+            zones=(out_s["zones"]["zones"] if isinstance(out_s.get("zones", None), dict) else None),
+            detach_target=self.pred_detach_target,
+            use_edge_weights=self.use_edge_weights,
+        )
+        pred_loss_t, pred_loss_t_dict = compute_zone_predictive_loss(
+            zone_pred=out_t_student.get("zone_pred", None),
+            zones=(out_t_student["zones"]["zones"] if isinstance(out_t_student.get("zones", None), dict) else None),
+            detach_target=self.pred_detach_target,
+            use_edge_weights=self.use_edge_weights,
+        )
 
         # -------- aux loss --------
         aux = student.reg_loss.collect(student) if hasattr(student, "reg_loss") else torch.tensor(0.0, device=device)
 
         # total
-        src_total = sem_loss_s + inst_loss_s
-        tgt_total = sem_loss_t + inst_loss_t
+        src_total = sem_loss_s + inst_loss_s + self.lambda_pred * pred_loss_s
+        tgt_total = sem_loss_t + inst_loss_t + self.lambda_pred * pred_loss_t
         total = src_total + self.lambda_tgt * tgt_total + self.lambda_aux * aux_weight * aux
 
         # -------- diagnostics (C) --------
@@ -247,6 +270,8 @@ class FrameSmoothieTrainStep:
             "loss_tgt_sem": sem_loss_t.detach(),
             "loss_tgt_inst": inst_loss_t.detach(),
             "loss_aux": aux.detach(),
+            "loss_pred_src": pred_loss_s.detach() if isinstance(pred_loss_s, torch.Tensor) else pred_loss_s,
+            "loss_pred_tgt": pred_loss_t.detach() if isinstance(pred_loss_t, torch.Tensor) else pred_loss_t,
             "corr_ref_src_ema": corr_ref,
             "corr_tgt_teacher": corr_tgt_teacher,
             "corr_tgt_student": corr_tgt_student,
@@ -254,6 +279,8 @@ class FrameSmoothieTrainStep:
             "corr_tgt_student_delta": (corr_tgt_student - corr_ref) if (corr_tgt_student is not None and corr_ref is not None) else None,
             "out_teacher_panoptic": out_t_teacher.get("panoptic", None),
             "pseudo": pseudo,
+            "pred_loss_src_dict": pred_loss_s_dict,
+            "pred_loss_tgt_dict": pred_loss_t_dict,
         }
         if return_diag:
             out["diag_tgt_teacher"] = diag_tgt_teacher

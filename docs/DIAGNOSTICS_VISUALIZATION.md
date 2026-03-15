@@ -1,124 +1,122 @@
 # Framesmoothie Diagnostics Visualization How‑To
 
-이 문서는 `DiagMeter`(torchmetrics 스타일 누적/리셋 가능한 진단 메터)로 수집한 LRCA/FMLM/HMC 진단 값을 **로깅/시각화**하는 실전 가이드를 제공한다.
+이 문서는 `DiagMeter`를 이용해 LRCA/FMLM/HMC 진단 값을 누적하고, TensorBoard / matplotlib / W&B / DDP 환경에서 시각화하는 방법을 설명한다.
 
-## 1) 무엇을 시각화할까?
+## 1) 무엇을 볼 것인가
 
-권장 진단 키(예시):
+권장 지표 예시:
 
-- `tgt_teacher/g_global_var`: global gate 분산
-- `tgt_teacher/corr_sem_inst`: semantic vs instance gate 상관
-- `tgt_student/corr_sem_inst_delta`: (target corr − source EMA baseline)
-- `tgt_student/g_semantic_mean`, `tgt_student/g_instance_mean`
+- `tgt_teacher/g_global_var`
+- `tgt_teacher/corr_sem_inst`
+- `tgt_student/corr_sem_inst`
+- `corr_ref_src_ema`
+- `corr_tgt_teacher_delta`
+- `corr_tgt_student_delta`
 
-목표:
+해석 예시:
 
-- global gate가 두 task에서 **공통 요인으로** 작동하는지(분산/드리프트)
-- semantic/instance local shared gate가 **적절히 분리**되는지(상관/델타)
-- teacher→student에서 gate 통계가 어떻게 이동하는지
+- `g_global_var ↓` : global gate가 거의 상수화됨
+- `corr_sem_inst → 1` : semantic/instance gate 분화 부족
+- `corr_tgt_*_delta` 편차 큼 : target에서 source 기준선과 다른 gate 관계
 
-## 2) 코드: DiagMeter 누적
+## 2) 기본 사용법
 
 ```python
 from framesmoothie.diag_meter import DiagMeter
 
 meter = DiagMeter(device="cpu")
 
-# train loop
 out = step(
     student=model,
     teacher=teacher,
     src=src_batch,
     tgt=tgt_batch,
-    diag_meter=meter,     # ✅ 누적
+    diag_meter=meter,
     return_diag=False,
 )
 
-# N step마다 요약
-if (global_step + 1) % 100 == 0:
-    means = meter.compute_means()
-    # 예: print 또는 logger로 전송
-    print(global_step, means.get("tgt_teacher/corr_sem_inst", None))
-    meter.reset()
+# 주기적으로
+means = meter.compute_means()
+print(means.get("tgt_teacher/corr_sem_inst", None))
+meter.reset()
 ```
 
-## 3) TensorBoard 로깅
+## 3) prefix 단위 집계
+
+`DiagMeter`는 prefix 필터링을 지원한다.
+
+```python
+teacher_stats = meter.compute_filtered(prefix="tgt_teacher/")
+student_means = meter.compute_means_filtered(prefix="tgt_student/")
+```
+
+## 4) TensorBoard
 
 ```python
 from torch.utils.tensorboard import SummaryWriter
 
-writer = SummaryWriter(log_dir="runs/framesmoothie")
-
-# ... inside periodic logging block
+writer = SummaryWriter("runs/framesmoothie")
 means = meter.compute_means()
 for k, v in means.items():
     writer.add_scalar(k, v, global_step)
 writer.flush()
 ```
 
-## 4) Matplotlib로 타임시리즈 플롯
-
-훈련 중 매 100 step마다 `means`를 리스트에 저장해두었다가 종료 후 플롯한다.
+## 5) Matplotlib
 
 ```python
 import matplotlib.pyplot as plt
 
-history = {"step": [], "corr": [], "gvar": []}
+history = {"step": [], "corr_teacher": [], "gvar_teacher": []}
 
-# periodic:
 means = meter.compute_means()
 history["step"].append(global_step)
-history["corr"].append(means.get("tgt_teacher/corr_sem_inst", float("nan")))
-history["gvar"].append(means.get("tgt_teacher/g_global_var", float("nan")))
+history["corr_teacher"].append(means.get("tgt_teacher/corr_sem_inst", float("nan")))
+history["gvar_teacher"].append(means.get("tgt_teacher/g_global_var", float("nan")))
 
-# after training:
 plt.figure()
-plt.plot(history["step"], history["corr"])
+plt.plot(history["step"], history["corr_teacher"])
 plt.xlabel("step")
-plt.ylabel("corr_sem_inst (teacher)")
+plt.ylabel("corr_sem_inst")
 plt.title("Target teacher corr_sem_inst")
-plt.show()
-
-plt.figure()
-plt.plot(history["step"], history["gvar"])
-plt.xlabel("step")
-plt.ylabel("g_global_var (teacher)")
-plt.title("Target teacher g_global variance")
 plt.show()
 ```
 
-## 5) W&B 로깅(선택)
+## 6) Weights & Biases
 
 ```python
 import wandb
 wandb.init(project="framesmoothie")
-
-means = meter.compute_means()
-wandb.log({k: v for k, v in means.items()}, step=global_step)
+wandb.log(meter.compute_means(), step=global_step)
 ```
 
-## 6) DDP에서의 진단 집계
+## 7) DDP
 
-DDP 환경에서 각 rank가 별도로 meter를 업데이트한다면, 로그를 내기 전에 `sync()`를 호출해 global 평균으로 만든다.
+DDP에서 로깅 전에는 `sync()`를 호출해 rank 간 통계를 맞춘다.
 
 ```python
-meter.sync()            # all-reduce sum/sumsq/count
-means = meter.compute_means()
+meter.sync()
+if rank == 0:
+    means = meter.compute_means()
 ```
 
 권장 패턴:
 
-- `rank==0`에서만 출력/로깅
-- `sync()`는 로깅 주기마다(예: 100 step마다) 호출
+- `sync()`는 로깅 주기마다 호출
+- 실제 출력/시각화는 `rank == 0`에서만 수행
 
-## 7) 해석 가이드
+## 8) 저장/복원
 
-- `g_global_var`가 0에 수렴: global gate가 거의 상수(학습이 죽었거나 과도하게 정규화됨)
-- `corr_sem_inst`가 1에 수렴: semantic/instance local gate가 사실상 동일(분리 부족)
-- `corr_sem_inst_delta`가 크게 음수/양수로 치우침: target에서 gate 관계가 source 기준선과 다름
-  - HMC pseudo 품질/threshold 조정 포인트
+```python
+state = meter.state_dict()
+# checkpoint에 저장
 
-## 8) 체크리스트
+meter2 = DiagMeter()
+meter2.load_state_dict(state)
+```
 
-- `DiagMeter.update()`는 **스칼라만 누적**한다. 벡터/텐서가 들어오면 무시됨.
-- `return_diag=True`는 디버그용(메모리/오버헤드 증가). 실전은 `diag_meter` 사용 권장.
+## 9) 주의사항
+
+- `DiagMeter.update()`는 **스칼라 텐서 / 숫자만** 누적한다.
+- `return_diag=True`는 raw dict를 직접 반환하므로 오버헤드가 있다.
+- 실전 학습은 `diag_meter` 누적 방식을 기본으로 두고, 필요한 step만 `return_diag=True`로 확인하는 것을 권장한다.

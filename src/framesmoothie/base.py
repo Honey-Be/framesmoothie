@@ -3,12 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-try:
-    # Python 3.12+
-    from typing import override, Tuple, Optional, Dict, Any, Callable, TypeVar, Generic
-except Exception:  # pragma: no cover
-    from typing_extensions import override, Tuple, Optional, Dict, Any, Callable, TypeVar, Generic
-
+from typing import override, Tuple, Optional, Dict, Any, Callable, TypeVar, Generic, Self
 
 from s9.rs9_modules import RS9Layer
 from s9.base import FPDTypeIdx, get_float_dtype
