@@ -1,11 +1,12 @@
 [project]
 name = "framesmoothie"
-version = "0.1.0"
+version = "0.1.1"
 description = ""
 authors = [
     {name = "윤병익",email = "yeun0908@gmail.com"}
 ]
 requires-python = ">=3.12, <3.15"
+license = "LGPL-2.1-or-later"
 
 [tool.poetry]
 requires-poetry = ">=2.0"
