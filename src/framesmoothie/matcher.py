@@ -103,7 +103,7 @@ def sample_points_uncertainty(
 
 @dataclass
 class MatcherWeights:
-    cls: float = 1.0
+    cls_: float = 1.0
     focal: float = 1.0
     dice: float = 1.0
 
@@ -166,8 +166,8 @@ class HungarianMatcher:
 
             # focal/dice costs: produce [K,M]
             # Expand to [K,M,num_points] via broadcasting
-            pred_k = pred_pts.unsqueeze(1)      # [K,1,Pp]
-            tgt_m = tgt_pts.unsqueeze(0)        # [1,M,Pp]
+            pred_k = pred_pts.unsqueeze(1).expand(-1, M, -1)  # [K,M,Pp]
+            tgt_m  = tgt_pts.unsqueeze(0).expand(K, -1, -1)   # [K,M,Pp]
 
             # focal cost (mean over points)
             prob_k = pred_k.sigmoid()
@@ -183,7 +183,7 @@ class HungarianMatcher:
             den = (probs + tgt_m).sum(dim=-1).clamp_min(1e-6)
             dice = 1 - (num / den)  # [K,M]
 
-            cost = self.w.cls * cls_cost + self.w.focal * focal + self.w.dice * dice
+            cost = self.w.cls_ * cls_cost + self.w.focal * focal + self.w.dice * dice
             cost = cost.detach().cpu()
 
             row_ind, col_ind = linear_sum_assignment(cost)

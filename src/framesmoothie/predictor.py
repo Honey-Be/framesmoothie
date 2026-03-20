@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Sequence, Any, Optional, Mapping
+from typing import Sequence, Any, Optional, Mapping, Literal
 
 import torch
 import torch.nn as nn
@@ -56,6 +56,19 @@ class ZoneEdgeSpec:
 
     # projector sharing
     projector_share_mode: str = "none"    # "none" | "shared"
+
+    # edge / projector normalization and post-processing
+    edge_norm: str = "none"
+    projector_norm: str = "none"
+    target_projector_norm: Optional[str] = None
+
+    projector_post_norm: str = "none"
+    target_projector_post_norm: Optional[str] = None
+    projector_temperature: float = 1.0
+    target_projector_temperature: Optional[float] = None
+    projector_whiten: bool = False
+    target_projector_whiten: Optional[bool] = None
+    projector_whiten_eps: float = 1e-4
 
     # projector regularization (primarily for Barlow/VICReg)
     projector_reg_type: Optional[str] = None  # "variance" | "covariance" | "var_cov" | "l2"
@@ -228,11 +241,11 @@ def build_edge_module(
         return nn.Identity()
     if kind == "linear":
         return _LinearPredictor(c_in=c_in, c_out=c_out, dtype=dtype)
-    if kind == "mlp":
+    if kind in {"mlp", "bnfree_mlp"}:
         return _MLPPredictor(c_in=c_in, c_out=c_out, hidden=hidden, depth=2, dtype=dtype)
-    if kind == "bottleneck_mlp":
+    if kind in {"bottleneck_mlp", "bnfree_bottleneck_mlp"}:
         return _MLPPredictor(c_in=c_in, c_out=c_out, hidden=hidden, depth=3, dtype=dtype)
-    if kind == "res_mlp":
+    if kind in {"res_mlp", "bnfree_res_mlp"}:
         return _ResidualMLPPredictor(c_in=c_in, c_out=c_out, hidden=hidden, dtype=dtype)
     if kind == "bilinear_mlp":
         return _BilinearMLPPredictor(c_in=c_in, c_out=c_out, hidden=hidden, dtype=dtype)
@@ -288,20 +301,27 @@ class ZonePredictiveGraph(nn.Module):
                     if tp_dim != p_dim:
                         raise ValueError(f"Projector dims must match for edge {k}: got online={p_dim}, target={tp_dim}")
 
-                    scale_proj_online[k] = build_edge_module(
+                    online_proj = build_edge_module(
                         kind=p_kind,
                         c_in=self.c_model,
                         c_out=p_dim,
                         hidden_mult=p_hidden,
                         dtype=self.dtype,
                     )
-                    scale_proj_target[k] = build_edge_module(
-                        kind=tp_kind,
-                        c_in=self.c_model,
-                        c_out=tp_dim,
-                        hidden_mult=tp_hidden,
-                        dtype=self.dtype,
-                    )
+                    share_mode = str(spec.projector_share_mode).lower()
+                    if share_mode == "shared" and tp_kind == p_kind and tp_dim == p_dim:
+                        target_proj = online_proj
+                    else:
+                        target_proj = build_edge_module(
+                            kind=tp_kind,
+                            c_in=self.c_model,
+                            c_out=tp_dim,
+                            hidden_mult=tp_hidden,
+                            dtype=self.dtype,
+                        )
+
+                    scale_proj_online[k] = online_proj
+                    scale_proj_target[k] = target_proj
 
             self.predictors.append(scale_pred)
             self.online_projectors.append(scale_proj_online)
@@ -335,6 +355,13 @@ class ZonePredictiveGraph(nn.Module):
                     "edge_norm": spec.edge_norm,
                     "projector_norm": spec.projector_norm,
                     "target_projector_norm": spec.target_projector_norm,
+                    "projector_post_norm": spec.projector_post_norm,
+                    "target_projector_post_norm": spec.target_projector_post_norm,
+                    "projector_temperature": spec.projector_temperature,
+                    "target_projector_temperature": spec.target_projector_temperature,
+                    "projector_whiten": spec.projector_whiten,
+                    "target_projector_whiten": spec.target_projector_whiten,
+                    "projector_whiten_eps": spec.projector_whiten_eps,
                     "projector_kind": spec.projector_kind,
                     "projector_dim": spec.projector_dim,
                     "projector_hidden_mult": spec.projector_hidden_mult,

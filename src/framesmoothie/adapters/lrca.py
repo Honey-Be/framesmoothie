@@ -89,22 +89,22 @@ class LRCAHub(AdapterHubBase):
 
     def get_context(self) -> Optional[torch.Tensor]:
         return self._ctx
-def get_task_context(self, task: str) -> torch.Tensor:
-    if self._ctx is None:
-        raise RuntimeError("LRCAHub context is not set")
-    if task not in self._task_to_id:
-        raise KeyError(f"Unknown task: {task}")
-    B = self._ctx.shape[0]
-    if self.task_id_dim == 1:
-        tid = torch.full((B, 1), float(self._task_to_id[task]), dtype=self._ctx.dtype, device=self._ctx.device)
-    else:
-        # one-hot encoding; require task_id_dim == len(tasks) for consistency
-        tid = torch.zeros((B, self.task_id_dim), dtype=self._ctx.dtype, device=self._ctx.device)
-        idx = self._task_to_id[task]
-        if idx >= self.task_id_dim:
-            raise ValueError("task_id_dim is too small for one-hot task encoding")
-        tid[:, idx] = 1.0
-    return torch.cat([self._ctx, tid], dim=-1)
+    def get_task_context(self, task: str) -> torch.Tensor:
+        if self._ctx is None:
+            raise RuntimeError("LRCAHub context is not set")
+        if task not in self._task_to_id:
+            raise KeyError(f"Unknown task: {task}")
+        B = self._ctx.shape[0]
+        if self.task_id_dim == 1:
+            tid = torch.full((B, 1), float(self._task_to_id[task]), dtype=self._ctx.dtype, device=self._ctx.device)
+        else:
+            # one-hot encoding; require task_id_dim == len(tasks) for consistency
+            tid = torch.zeros((B, self.task_id_dim), dtype=self._ctx.dtype, device=self._ctx.device)
+            idx = self._task_to_id[task]
+            if idx >= self.task_id_dim:
+                raise ValueError("task_id_dim is too small for one-hot task encoding")
+            tid[:, idx] = 1.0
+        return torch.cat([self._ctx, tid], dim=-1)
 
 
     def global_gate(self) -> torch.Tensor:
@@ -280,7 +280,7 @@ class LRCAAdapter(ModuleAdapterBase):
             ctx_dim=self.ctx_dim,
             rank_shared=self.rank_shared,
             tasks=self.tasks,
-            task_id_dim=self.task_id_dim,
+            task_id_dim=task_id_dim,
             fmlm_rank=self.fmlm_rank,
             fmlm_eta=self.fmlm_eta,
             dtype_idx=dtype_idx,

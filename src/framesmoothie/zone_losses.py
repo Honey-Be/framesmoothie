@@ -24,6 +24,49 @@ def _apply_norm(x: torch.Tensor, kind: str, eps: float = 1e-8) -> torch.Tensor:
         return (x - mu) / std
     raise ValueError(f"Unsupported normalization kind={kind!r}")
 
+
+
+def _whiten_features(x: torch.Tensor, eps: float = 1e-4) -> torch.Tensor:
+    """
+    Channel whitening on the last dimension.
+    Input can be [..., C]; internally flattened to [N, C].
+    """
+    z = _flatten_features(x)
+    if z.shape[0] < 2:
+        return x
+    mu = z.mean(dim=0, keepdim=True)
+    zc = z - mu
+    c = zc.shape[-1]
+    cov = (zc.T @ zc) / max(zc.shape[0] - 1, 1)
+    eye = torch.eye(c, device=zc.device, dtype=zc.dtype)
+    cov = cov + eps * eye
+    evals, evecs = torch.linalg.eigh(cov)
+    inv_sqrt = evecs @ torch.diag(torch.rsqrt(torch.clamp(evals, min=eps))) @ evecs.T
+    zw = zc @ inv_sqrt
+    return zw.reshape(*x.shape[:-1], x.shape[-1])
+
+def _apply_temperature(x: torch.Tensor, temperature: float) -> torch.Tensor:
+    t = float(temperature)
+    if t <= 0:
+        raise ValueError("temperature must be positive")
+    if abs(t - 1.0) < 1e-12:
+        return x
+    return x / t
+
+def _apply_postprocess(
+    x: torch.Tensor,
+    *,
+    norm_kind: str = "none",
+    whiten: bool = False,
+    temperature: float = 1.0,
+    eps: float = 1e-8,
+    whiten_eps: float = 1e-4,
+) -> torch.Tensor:
+    y = _apply_norm(x, norm_kind, eps=eps)
+    if whiten:
+        y = _whiten_features(y, eps=whiten_eps)
+    y = _apply_temperature(y, temperature)
+    return y
 def _kl_div_channel_last(pred: torch.Tensor, tgt: torch.Tensor) -> torch.Tensor:
     return F.kl_div(
         F.log_softmax(pred, dim=-1),
@@ -237,24 +280,61 @@ def compute_zone_predictive_loss(
             loss_type = str(meta.get("loss_type", "smooth_l1"))
             loss_kwargs = dict(meta.get("loss_kwargs", {}) or {})
 
+            has_projector_pair = (k in scale_proj_preds and k in scale_proj_tgts)
             use_projector_space = (
                 loss_type.lower() in {"simsiam", "symmetric_simsiam", "sym_simsiam", "barlow", "vicreg"}
-                and k in scale_proj_preds
-                and k in scale_proj_tgts
+                and has_projector_pair
             )
 
-            if use_projector_space:
-                pred = scale_proj_preds[k]
-                tgt = scale_proj_tgts[k]
+            eps = float(loss_kwargs.get("eps", 1e-8))
 
-                pred = _apply_norm(pred, str(meta.get("projector_norm", "none")), eps=float(loss_kwargs.get("eps", 1e-8)))
-                target_norm = meta.get("target_projector_norm", None)
+            # Always prepare projector-space views when available so projector regularization
+            # can be applied for any edge/loss, not only projector-native losses.
+            proj_pred = None
+            proj_tgt = None
+            if has_projector_pair:
+                proj_pred = scale_proj_preds[k]
+                proj_tgt = scale_proj_tgts[k]
+
+                pred_norm = str(meta.get("projector_post_norm", meta.get("projector_norm", "none")))
+                target_norm = meta.get("target_projector_post_norm", None)
                 if target_norm is None:
-                    target_norm = meta.get("projector_norm", "none")
-                tgt = _apply_norm(tgt, str(target_norm), eps=float(loss_kwargs.get("eps", 1e-8)))
+                    target_norm = meta.get("target_projector_norm", meta.get("projector_norm", "none"))
+
+                pred_whiten = bool(meta.get("projector_whiten", False))
+                target_whiten = meta.get("target_projector_whiten", None)
+                if target_whiten is None:
+                    target_whiten = bool(meta.get("projector_whiten", False))
+
+                pred_temp = float(meta.get("projector_temperature", 1.0))
+                target_temp = meta.get("target_projector_temperature", None)
+                if target_temp is None:
+                    target_temp = pred_temp
+
+                whiten_eps = float(meta.get("projector_whiten_eps", 1e-4))
+                proj_pred = _apply_postprocess(
+                    proj_pred,
+                    norm_kind=pred_norm,
+                    whiten=pred_whiten,
+                    temperature=pred_temp,
+                    eps=eps,
+                    whiten_eps=whiten_eps,
+                )
+                proj_tgt = _apply_postprocess(
+                    proj_tgt,
+                    norm_kind=str(target_norm),
+                    whiten=bool(target_whiten),
+                    temperature=float(target_temp),
+                    eps=eps,
+                    whiten_eps=whiten_eps,
+                )
+
+            if use_projector_space:
+                pred = proj_pred
+                tgt = proj_tgt
             else:
-                pred = _apply_norm(pred_raw, str(meta.get("edge_norm", "none")), eps=float(loss_kwargs.get("eps", 1e-8)))
-                tgt = _apply_norm(tgt_raw, str(meta.get("edge_norm", "none")), eps=float(loss_kwargs.get("eps", 1e-8)))
+                pred = _apply_norm(pred_raw, str(meta.get("edge_norm", "none")), eps=eps)
+                tgt = _apply_norm(tgt_raw, str(meta.get("edge_norm", "none")), eps=eps)
 
             detach_this = meta.get("detach_target", None)
             lt = loss_type.lower()
@@ -269,7 +349,9 @@ def compute_zone_predictive_loss(
                 detach_flag = bool(detach_this)
 
             if detach_flag:
-                 tgt = tgt.detach()
+                tgt = tgt.detach()
+                if proj_tgt is not None:
+                    proj_tgt = proj_tgt.detach()
 
             loss_main = compute_edge_loss(
                 pred,
@@ -280,13 +362,14 @@ def compute_zone_predictive_loss(
             )
             loss_total = loss_main
 
-            # projector regularization: primarily for Barlow/VICReg projector paths
+            # projector regularization: available for any edge/loss whenever projector
+            # paths exist and regularization is configured.
             reg_weight = float(meta.get("projector_reg_weight", 0.0))
             reg_type = meta.get("projector_reg_type", None)
-            if use_projector_space and reg_weight > 0.0 and reg_type not in {None, ""} and lt in {"barlow", "vicreg"}:
+            if proj_pred is not None and proj_tgt is not None and reg_weight > 0.0 and reg_type not in {None, ""}:
                 reg = _projector_regularization(
-                    pred,
-                    tgt,
+                    proj_pred,
+                    proj_tgt,
                     reg_type=str(reg_type),
                     reg_kwargs=dict(meta.get("projector_reg_kwargs", {}) or {}),
                 )

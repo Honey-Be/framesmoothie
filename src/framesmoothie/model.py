@@ -4,7 +4,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union, Callable
 
-from framesmoothie.base import auxloss
+from torchutils.decorators import auxloss
 from framesmoothie.heads import SemanticFPNHead, RS9InstanceHead
 from framesmoothie.decoder import RS9Decoder, RS9DecoderLayer
 from framesmoothie.panoptic import panoptic_fusion
@@ -20,7 +20,7 @@ from s9.rs9_modules import RS9Layer
 from s9.activations.real.hglu import HGLU
 
 from s9.activations.complex.stable_cardioid import StableComplexCardioid
-from s9.s9_modules import S9Layer
+from s9.modules import S9Layer
 
 
 def _to_channel_last(x_cf: torch.Tensor) -> torch.Tensor:
@@ -89,7 +89,7 @@ def infer_inverse_transform(T: nn.Module, **kwargs) -> nn.Module:
     return inv_cls(**kwargs)
 
 
-class LazyS9Stack(nn.Module):
+class S9Stack(nn.Module):
     """
     Minimal complex-valued S9 encoder stack.
     Builds a stack of S9Layer blocks lazily on first forward based on the input spatial shape.
@@ -98,6 +98,7 @@ class LazyS9Stack(nn.Module):
         self,
         *,
         c_model: int,
+        spatial_dims: int,
         depth: int = 4,
         eps: float = 1e-6,
         dtype_idx: FPDTypeIdx = 64,
@@ -109,13 +110,10 @@ class LazyS9Stack(nn.Module):
         self.eps = eps
         self.dtype_idx = dtype_idx
         self.gen_activation = gen_activation
-        self.layers: Optional[nn.ModuleList] = None
-
-    def _build(self, spatial_shapes: Tuple[int, ...]):
-        self.layers = nn.ModuleList([
+        self.layers: nn.ModuleList = nn.ModuleList([
             S9Layer(
                 d_model=self.c_model,
-                spatial_shapes=spatial_shapes,
+                spatial_dims=spatial_dims,
                 gen_activation=self.gen_activation,
                 eps=self.eps,
                 dtype_idx=self.dtype_idx,
@@ -125,9 +123,6 @@ class LazyS9Stack(nn.Module):
 
     def forward(self, z_cf: torch.Tensor) -> torch.Tensor:
         # z_cf: [B,C,*S] complex
-        spatial_shapes = tuple(z_cf.shape[2:])
-        if self.layers is None:
-            self._build(spatial_shapes)
         out = z_cf
         for layer in self.layers:  # type: ignore[union-attr]
             out = layer(out)
@@ -155,6 +150,7 @@ class FrameSmoothiePanopticModel(nn.Module):
         # encoder
         encoder: Optional[nn.Module] = None,
         c_model: int,
+        enc_c_model: Optional[int] = None,
         spatial_dims: int,
         # semantic
         num_semantic_classes: int,
@@ -198,6 +194,8 @@ class FrameSmoothiePanopticModel(nn.Module):
         zone_names: tuple[str, ...] = ("content", "structure", "label", "boundary"),
         semantic_zone_names: tuple[str, ...] = ("content", "structure", "boundary"),
         instance_zone_names: tuple[str, ...] = ("content", "label", "boundary"),
+        semantic_zone_weights: Optional[dict[str, float]] = None,
+        instance_zone_weights: Optional[dict[str, float]] = None,
         # zone-wise predictive loss (optional)
         use_zone_prediction: bool = False,
         zone_pred_edges: tuple[ZoneEdgeSpec | tuple[tuple[str, ...], str] | tuple[tuple[str, ...], str, float], ...] = ((("structure",), "boundary"), (("content", "structure"), "label")),
@@ -205,7 +203,8 @@ class FrameSmoothiePanopticModel(nn.Module):
     ):
         super().__init__()
         self.dtype = get_float_dtype(dtype_idx)
-        self.c_model = c_model
+        self.c_model = int(c_model)                # decoder / post-bridge channel dim
+        self.enc_c_model = int(enc_c_model) if enc_c_model is not None else int(c_model)  # encoder / pre-bridge channel dim
         self.spatial_dims = spatial_dims
         self.instance_level = int(instance_level)
         self.aux_weight_default = float(aux_weight_default)
@@ -219,7 +218,10 @@ class FrameSmoothiePanopticModel(nn.Module):
         self.T = transform_fwd
         self.T_inv = transform_inv if transform_inv is not None else infer_inverse_transform(transform_fwd)
 
-        self.encoder = encoder if encoder is not None else LazyS9Stack(c_model=c_model, depth=4, eps=eps, dtype_idx=dtype_idx)
+        # build pyramid levels by pooling in real domain
+        self.num_pyr_levels = 4  # 1,2,4,8
+
+        self.encoder = encoder if encoder is not None else S9Stack(c_model=self.enc_c_model, depth=4, eps=eps, dtype_idx=dtype_idx, spatial_dims=spatial_dims)
 
         # Optional pre-bridge realification of zL for future dual-view zoning
         self.pre_bridge_map = resolve_pre_bridge_map(pre_bridge_map)
@@ -228,7 +230,7 @@ class FrameSmoothiePanopticModel(nn.Module):
         if self.pre_bridge_map is not None:
             self.pre_bridge_projector = PreBridgeProjector(
                 map_spec=self.pre_bridge_map,
-                in_channels=c_model,
+                in_channels=self.enc_c_model,
                 out_channels=self.pre_bridge_channels,
                 spatial_dims=spatial_dims,
                 dtype_idx=dtype_idx,
@@ -243,11 +245,13 @@ class FrameSmoothiePanopticModel(nn.Module):
             self.zoning_block = DualViewZoningBlock(
                 num_scales=self.num_pyr_levels,
                 c_pre=self.pre_bridge_channels,
-                c_post=c_model,
-                c_out=c_model,
+                c_post=self.c_model,
+                c_out=self.c_model,
                 zone_names=zone_names,
                 semantic_zone_names=semantic_zone_names,
                 instance_zone_names=instance_zone_names,
+                semantic_zone_weights=semantic_zone_weights,
+                instance_zone_weights=instance_zone_weights,
                 dtype_idx=dtype_idx,
             )
         else:
@@ -259,19 +263,16 @@ class FrameSmoothiePanopticModel(nn.Module):
                 raise ValueError("use_zone_prediction=True requires use_zoning=True.")
             self.zone_predictor = ZonePredictiveGraph(
                 num_scales=self.num_pyr_levels,
-                c_model=c_model,
+                c_model=self.c_model,
                 edge_specs=zone_pred_edges,
                 dtype_idx=dtype_idx,
             )
         else:
             self.zone_predictor = None
 
-        # build pyramid levels by pooling in real domain
-        self.num_pyr_levels = 4  # 1,2,4,8
-
         self.semantic_head = SemanticFPNHead(
             num_classes=num_semantic_classes,
-            c_model=c_model,
+            c_model=self.c_model,
             spatial_dims=spatial_dims,
             hidden_dim=semantic_hidden_dim,
             dropout=dropout,
@@ -302,7 +303,7 @@ class FrameSmoothiePanopticModel(nn.Module):
         self.decoder = RS9Decoder(layers)
 
         self.instance_head = RS9InstanceHead(
-            c_model=c_model,
+            c_model=self.c_model,
             q_dim=q_dim,
             num_classes=num_instance_classes,
             mask_dim=instance_mask_dim,
@@ -355,6 +356,8 @@ class FrameSmoothiePanopticModel(nn.Module):
                 rl = getattr(m, "_reg_loss")
                 if isinstance(rl, torch.Tensor):
                     setattr(m, "_reg_loss", rl.detach().new_tensor(value).reshape(()))
+    
+    
 
     def _make_pyramid(self, x_cf: torch.Tensor) -> List[torch.Tensor]:
         # x_cf: [B,C,*S] real

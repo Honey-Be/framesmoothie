@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
+from typing import Mapping
 
 from s9.base import FPDTypeIdx, get_float_dtype
 from s9.activations.real.hglu import HGLU
@@ -87,6 +88,28 @@ class _ZoneFuseUnit(nn.Module):
         alpha = self.gate(torch.cat([pre, post], dim=-1))
         return alpha * h_pre + (1.0 - alpha) * h_post
 
+def _weighted_zone_sum(
+    zone_dict: dict[str, torch.Tensor],
+    zone_names: tuple[str, ...],
+    zone_weights: Mapping[str, float] | None = None,
+) -> torch.Tensor:
+    if len(zone_names) == 0:
+        raise ValueError("zone_names must be non-empty")
+    if zone_weights is None:
+        return sum(zone_dict[z] for z in zone_names)
+
+    weighted = None
+    denom = 0.0
+    for z in zone_names:
+        w = float(zone_weights.get(z, 1.0))
+        if w == 0.0:
+            continue
+        term = zone_dict[z] * w
+        weighted = term if weighted is None else (weighted + term)
+        denom += abs(w)
+    if weighted is None or denom <= 0.0:
+        raise ValueError("All zone weights are zero; at least one non-zero weight is required.")
+    return weighted / denom
 
 class DualViewZoningBlock(nn.Module):
     """Fuse pre/post pyramids into typed zone pyramids.
@@ -110,6 +133,8 @@ class DualViewZoningBlock(nn.Module):
         zone_names: tuple[str, ...] = ("content", "structure", "label", "boundary"),
         semantic_zone_names: tuple[str, ...] = ("content", "structure", "boundary"),
         instance_zone_names: tuple[str, ...] = ("content", "label", "boundary"),
+        instance_zone_weights: Mapping[str, float] | None = None,
+        semantic_zone_weights: Mapping[str, float] | None = None,
         dtype_idx: FPDTypeIdx = 64,
     ):
         super().__init__()
@@ -121,6 +146,8 @@ class DualViewZoningBlock(nn.Module):
         self.zone_names = tuple(zone_names)
         self.semantic_zone_names = tuple(semantic_zone_names)
         self.instance_zone_names = tuple(instance_zone_names)
+        self.semantic_zone_weights = dict(semantic_zone_weights) if semantic_zone_weights is not None else None
+        self.instance_zone_weights = dict(instance_zone_weights) if instance_zone_weights is not None else None
 
         self.units = nn.ModuleList()
         for _ in range(self.num_scales):
@@ -148,8 +175,8 @@ class DualViewZoningBlock(nn.Module):
                 zone_dict[z] = self.units[s][z](pre, post)
             zone_pyr.append(zone_dict)
 
-            sem = sum(zone_dict[z] for z in self.semantic_zone_names)
-            inst = sum(zone_dict[z] for z in self.instance_zone_names)
+            sem = _weighted_zone_sum(zone_dict, self.semantic_zone_names, self.semantic_zone_weights)
+            inst = _weighted_zone_sum(zone_dict, self.instance_zone_names, self.instance_zone_weights)
             sem_pyr.append(sem)
             inst_pyr.append(inst)
 

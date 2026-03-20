@@ -1,13 +1,14 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Protocol
 
+from torchutils.decorators import auxloss
 from framesmoothie.matcher import SetCriterion
 from framesmoothie.hmc import HMCCalibrator
 from framesmoothie.diag_meter import DiagMeter
 from framesmoothie.zone_losses import compute_zone_predictive_loss
-
+from framesmoothie.model import FrameSmoothiePanopticModel
 
 def _resize_targets_masks(
     targets: List[Dict[str, torch.Tensor]],
@@ -54,7 +55,6 @@ def semantic_ce_loss(
     if logits.numel() == 0:
         return torch.tensor(0.0, device=sem_logits.device)
     return F.cross_entropy(logits, labels, ignore_index=ignore_index)
-
 
 class FrameSmoothieTrainStep:
     """
@@ -109,7 +109,7 @@ class FrameSmoothieTrainStep:
     def __call__(
         self,
         *,
-        student: nn.Module,
+        student: FrameSmoothiePanopticModel,
         teacher: nn.Module,
         src: Dict[str, Any],
         tgt: Dict[str, Any],
@@ -231,7 +231,7 @@ class FrameSmoothieTrainStep:
         )
 
         # -------- aux loss --------
-        aux = student.reg_loss.collect(student) if hasattr(student, "reg_loss") else torch.tensor(0.0, device=device)
+        aux = FrameSmoothiePanopticModel.reg_loss.collect(student, aggregate=torch.sum)
 
         # total
         src_total = sem_loss_s + inst_loss_s + self.lambda_pred * pred_loss_s

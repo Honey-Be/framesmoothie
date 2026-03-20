@@ -232,7 +232,7 @@ class RS9CondMixBlock(nn.Module):
             comp = F.relu(overlap - 1.0)
             reg = reg + (self.lambda_gate_competition * comp.mean())
 
-        self.reg_loss = reg
+        self._reg_loss = reg
 
         # 4) values
         vx = self.vx(x_flat)                    # [B,N,V]
