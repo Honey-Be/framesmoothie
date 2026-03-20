@@ -1,6 +1,6 @@
 [project]
 name = "framesmoothie"
-version = "0.1.1"
+version = "0.1.2"
 description = ""
 authors = [
     {name = "윤병익",email = "yeun0908@gmail.com"}
@@ -58,10 +58,10 @@ torchutils = [
 numpy = "^2.4.2"
 
 [tool.poetry.extras]
-cpu = ["torch", "s9"]
-cu126 = ["torch", "s9"]
-cu128 = ["torch", "s9"]
-cu130 = ["torch", "s9"]
+cpu = ["torch", "torchutils", "s9"]
+cu126 = ["torch", "torchutils", "s9"]
+cu128 = ["torch", "torchutils", "s9"]
+cu130 = ["torch", "torchutils", "s9"]
 
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]
