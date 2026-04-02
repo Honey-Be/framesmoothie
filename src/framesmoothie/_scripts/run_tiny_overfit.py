@@ -9,7 +9,7 @@ import math
 from pathlib import Path
 import shutil
 import sys
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Literal
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
@@ -43,7 +43,7 @@ from framesmoothie.train_step import FrameSmoothieTrainStep
 from framesmoothie.trainer_runtime import RuntimeEnv, RuntimePolicy, RuntimeState, make_step_program
 from framesmoothie._scripts.presets import get_preset, list_presets
 from s9.transforms.dost import DOST, IDOST
-
+from s9.base import FPDTypeIdx
 
 def _to_jsonable(obj: Any) -> Any:
     if obj is None or isinstance(obj, (str, int, float, bool)):
@@ -382,7 +382,7 @@ def run_overfit(
     ema_beta_start: float = 0.99,
     ema_beta_end: float = 0.999,
     seed: int = 0,
-    dtype_bits: int = 32,
+    dtype_bits: Literal[16, 32, 64] = 32,
     microbatch_size: Optional[int] = None,
     cpu_fallback_on_cuda_oom: bool = True,
     max_oom_retries: int = 16,
@@ -411,10 +411,12 @@ def run_overfit(
         z_probe = transform_fwd(src["image"][:1])
     enc_c_model = int(z_probe.shape[1])
 
+    dtype_idx: FPDTypeIdx = dtype_bits * 2
+
     model_kwargs = dict(
         transform_fwd=transform_fwd,
         transform_inv=transform_inv,
-        encoder=S9Stack(c_model=enc_c_model, depth=1, spatial_dims=2, dtype_idx=dtype_bits),
+        encoder=S9Stack(c_model=enc_c_model, depth=1, spatial_dims=2, dtype_idx=dtype_idx),
         c_model=c_model,
         enc_c_model=enc_c_model,
         spatial_dims=2,
@@ -423,7 +425,7 @@ def run_overfit(
         q_dim=c_model,
         num_queries=4,
         decoder_layers=1,
-        dtype_idx=dtype_bits,
+        dtype_idx=dtype_idx,
         pre_bridge_map=preset_cfg.get("pre_bridge_map", "log1p_arsinh"),
         pre_bridge_channels=preset_cfg.get("pre_bridge_channels", c_model) or c_model,
         use_zoning=preset_cfg.get("use_zoning", False),
