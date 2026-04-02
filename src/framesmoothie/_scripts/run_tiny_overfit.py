@@ -1,33 +1,51 @@
-
 from __future__ import annotations
 
 import argparse
 import csv
-import json
+import dataclasses
 from datetime import datetime
+import json
+import math
 from pathlib import Path
+import shutil
 import sys
 from typing import Any, Dict, Optional
-import shutil
 
-ROOT = Path(__file__).resolve().parents[1]
-SRC = ROOT / "src"
-if str(SRC) not in sys.path:
-    sys.path.insert(0, str(SRC))
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 import torch
 import torch.nn as nn
 
-from framesmoothie.model import FrameSmoothiePanopticModel, make_ema_teacher, ema_update, S9Stack
-from framesmoothie.matcher import HungarianMatcher, SetCriterion
-from framesmoothie.hmc import HMCCalibrator
-from framesmoothie.train_step import FrameSmoothieTrainStep
+from framesmoothie.checkpointing import (
+    export_state_dict_artifact,
+    load_training_checkpoint,
+    save_training_checkpoint,
+)
 from framesmoothie.diag_meter import DiagMeter
+from framesmoothie.fp import curry
+from framesmoothie.hmc import HMCCalibrator
+from framesmoothie.matcher import HungarianMatcher, SetCriterion
+from framesmoothie.model import FrameSmoothiePanopticModel, S9Stack, ema_update, make_ema_teacher
+from framesmoothie.repro import (
+    DeterminismConfig,
+    RngRegistry,
+    RngSnapshot,
+    SeedPath,
+    choose_multiprocessing_context,
+    configure_determinism,
+    rng_digest,
+    restore_rng_snapshot,
+)
+from framesmoothie.safetensors_io import load_object
+from framesmoothie.train_step import FrameSmoothieTrainStep
+from framesmoothie.trainer_runtime import RuntimeEnv, RuntimePolicy, RuntimeState, make_step_program
 from framesmoothie._scripts.presets import get_preset, list_presets
 from s9.transforms.dost import DOST, IDOST
-import dataclasses
 
-def _to_jsonable(obj):
+
+def _to_jsonable(obj: Any) -> Any:
     if obj is None or isinstance(obj, (str, int, float, bool)):
         return obj
     if isinstance(obj, Path):
@@ -52,89 +70,28 @@ def _to_jsonable(obj):
     return repr(obj)
 
 
-
-def collate(batch):
-    images = torch.stack([b["image"] for b in batch])
-    sem = torch.stack([b["sem_labels"] for b in batch])
-    inst_targets = [b["inst_targets"] for b in batch]
-    return {"image": images, "sem_labels": sem, "inst_targets": inst_targets}
-
-
-def _make_run_dir(output_root: Path, preset: str, run_name: Optional[str]) -> Path:
-    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
-    name = run_name if run_name is not None else f"{preset}_{ts}"
-    run_dir = output_root / name
-    run_dir.mkdir(parents=True, exist_ok=True)
-    return run_dir
-
-
-def _write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
-    with path.open("w", encoding="utf-8") as f:
-        for row in rows:
-            f.write(json.dumps(row, ensure_ascii=False) + "\n")
-
-
-def _read_jsonl(path: Path) -> list[dict[str, Any]]:
-    if not path.exists():
-        return []
-    rows: list[dict[str, Any]] = []
-    with path.open("r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if line:
-                rows.append(json.loads(line))
-    return rows
-
-
-def _select_key(row: dict[str, Any], metric_name: str) -> Optional[float]:
-    v = row.get(metric_name, None)
-    if v is None:
-        return None
-    try:
-        return float(v)
-    except Exception:
-        return None
-
-
-def _is_better(candidate: float, best: float, mode: str, min_delta: float = 0.0) -> bool:
-    if mode == "max":
-        return candidate > (best + min_delta)
-    return candidate < (best - min_delta)
-
-
-def _save_metrics_csv(path: Path, rows: list[dict[str, Any]]) -> None:
-    fieldnames = sorted({k for r in rows for k in r.keys()}) if rows else []
-    with path.open("w", newline="", encoding="utf-8") as f:
-        if not fieldnames:
-            f.write("")
-            return
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(rows)
-
-
-
-def _build_scheduler(opt: torch.optim.Optimizer, *, scheduler_kind: str, steps: int, step_size: int, gamma: float):
-    kind = scheduler_kind.lower()
-    if kind == "none":
-        return None
-    if kind == "cosine":
-        return torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=max(1, steps))
-    if kind == "step":
-        return torch.optim.lr_scheduler.StepLR(opt, step_size=max(1, step_size), gamma=gamma)
-    raise ValueError(f"Unknown scheduler_kind: {scheduler_kind}")
-
+@curry
+def _call_train_step(
+    stepper: FrameSmoothieTrainStep,
+    student: FrameSmoothiePanopticModel,
+    teacher: nn.Module,
+    diag_meter: Optional[DiagMeter],
+    return_diag: bool,
+    src: Dict[str, Any],
+    tgt: Dict[str, Any],
+) -> Dict[str, Any]:
+    return stepper(
+        student=student,
+        teacher=teacher,
+        src=src,
+        tgt=tgt,
+        diag_meter=diag_meter,
+        return_diag=return_diag,
+    )
 
 
 class EmaDecayScheduler:
-    """Simple stateful EMA decay scheduler for teacher update.
-
-    step() increments the internal step counter and returns the EMA beta for that step.
-    Supported kinds:
-      - constant: beta_start
-      - linear:   interpolate beta_start -> beta_end over total_steps
-      - cosine:   cosine interpolate beta_start -> beta_end over total_steps
-    """
+    """Simple stateful EMA decay scheduler for teacher update."""
 
     def __init__(
         self,
@@ -186,6 +143,145 @@ class EmaDecayScheduler:
         self.last_step = int(state.get("last_step", self.last_step))
 
 
+
+def collate(batch: list[dict[str, Any]]) -> dict[str, Any]:
+    images = torch.stack([b["image"] for b in batch])
+    sem = torch.stack([b["sem_labels"] for b in batch])
+    inst_targets = [b["inst_targets"] for b in batch]
+    return {"image": images, "sem_labels": sem, "inst_targets": inst_targets}
+
+
+
+def _make_run_dir(output_root: Path, preset: str, run_name: Optional[str]) -> Path:
+    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+    name = run_name if run_name is not None else f"{preset}_{ts}"
+    run_dir = output_root / name
+    run_dir.mkdir(parents=True, exist_ok=True)
+    return run_dir
+
+
+
+def _write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
+    with path.open("w", encoding="utf-8") as f:
+        for row in rows:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+
+def _read_jsonl(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    rows: list[dict[str, Any]] = []
+    with path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                rows.append(json.loads(line))
+    return rows
+
+
+
+def _select_key(row: dict[str, Any], metric_name: str) -> Optional[float]:
+    v = row.get(metric_name, None)
+    if v is None:
+        return None
+    try:
+        return float(v)
+    except Exception:
+        return None
+
+
+
+def _is_better(candidate: float, best: float, mode: str, min_delta: float = 0.0) -> bool:
+    if mode == "max":
+        return candidate > (best + min_delta)
+    return candidate < (best - min_delta)
+
+
+
+def _save_metrics_csv(path: Path, rows: list[dict[str, Any]]) -> None:
+    fieldnames = sorted({k for r in rows for k in r.keys()}) if rows else []
+    with path.open("w", newline="", encoding="utf-8") as f:
+        if not fieldnames:
+            f.write("")
+            return
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+
+def _build_scheduler(opt: torch.optim.Optimizer, *, scheduler_kind: str, steps: int, step_size: int, gamma: float):
+    kind = scheduler_kind.lower()
+    if kind == "none":
+        return None
+    if kind == "cosine":
+        return torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=max(1, steps))
+    if kind == "step":
+        return torch.optim.lr_scheduler.StepLR(opt, step_size=max(1, step_size), gamma=gamma)
+    raise ValueError(f"Unknown scheduler_kind: {scheduler_kind}")
+
+
+
+def _load_sample_file(path: Path) -> dict[str, Any]:
+    if path.suffix == ".safetensors":
+        sample = load_object(path, device="cpu")
+    else:
+        sample = torch.load(path, map_location="cpu")
+    if not isinstance(sample, dict):
+        raise TypeError(f"Expected sample payload to be a dict, got {type(sample)!r}")
+    return sample
+
+
+
+def _load_selected_domain(dir_path: Path, *, limit: int) -> list[dict[str, Any]]:
+    files = sorted([
+        *dir_path.glob("*.pt"),
+        *dir_path.glob("*.pth"),
+        *dir_path.glob("*.safetensors"),
+    ])
+    if not files:
+        raise FileNotFoundError(f"No sample files found under {dir_path}")
+    selected = files[: min(limit, len(files))]
+    return [_load_sample_file(path) for path in selected]
+
+
+
+def _load_overfit_batches(dataset: Path, *, sample_limit: int) -> tuple[dict[str, Any], dict[str, Any], str]:
+    if dataset.is_dir():
+        src_dir = dataset / "src"
+        tgt_dir = dataset / "tgt"
+        if not src_dir.exists() or not tgt_dir.exists():
+            raise FileNotFoundError(
+                f"Directory datasets must contain 'src/' and 'tgt/' subdirectories: {dataset}"
+            )
+        src = collate(_load_selected_domain(src_dir, limit=sample_limit))
+        tgt = collate(_load_selected_domain(tgt_dir, limit=sample_limit))
+        return src, tgt, "directory"
+
+    data = torch.load(dataset, map_location="cpu")
+    src = collate(data["src"][:sample_limit])
+    tgt = collate(data["tgt"][:sample_limit])
+    return src, tgt, "torch_file"
+
+
+
+def _capture_stepper_state(stepper: FrameSmoothieTrainStep) -> dict[str, Any]:
+    src_corr = stepper._src_corr_ema
+    if isinstance(src_corr, torch.Tensor):
+        src_corr = src_corr.detach().clone()
+    return {"src_corr_ema": src_corr}
+
+
+
+def _restore_stepper_state(stepper: FrameSmoothieTrainStep, state: dict[str, Any]) -> None:
+    src_corr = state.get("src_corr_ema", None)
+    if isinstance(src_corr, torch.Tensor):
+        src_corr = src_corr.detach().clone()
+    stepper._src_corr_ema = src_corr
+
+
+
 def _save_checkpoint(
     path: Path,
     *,
@@ -197,28 +293,42 @@ def _save_checkpoint(
     scheduler: Optional[torch.optim.lr_scheduler.LRScheduler],
     ema_scheduler: EmaDecayScheduler,
     meter: DiagMeter,
+    stepper: FrameSmoothieTrainStep,
     row: dict[str, Any],
     best_metric: Optional[float],
     topk: list[dict[str, Any]],
     global_step: int,
-):
-    torch.save(
-        {
-            "step": step,
-            "global_step": global_step,
-            "preset": preset,
-            "model_state_dict": model.state_dict(),
-            "teacher_state_dict": teacher.state_dict(),
-            "optimizer_state_dict": opt.state_dict(),
-            "scheduler_state_dict": None if scheduler is None else scheduler.state_dict(),
-            "ema_scheduler_state_dict": ema_scheduler.state_dict(),
-            "diag_meter_state_dict": meter.state_dict(),
-            "row": row,
-            "best_metric": best_metric,
-            "topk": topk,
-        },
+    runtime_state: RuntimeState,
+    rng_registry: RngRegistry,
+) -> Path:
+    rng_snapshot = rng_registry.snapshot()
+    payload = {
+        "step": int(step),
+        "global_step": int(global_step),
+        "preset": preset,
+        "model_state_dict": model.state_dict(),
+        "teacher_state_dict": teacher.state_dict(),
+        "optimizer_state_dict": opt.state_dict(),
+        "scheduler_state_dict": None if scheduler is None else scheduler.state_dict(),
+        "ema_scheduler_state_dict": ema_scheduler.state_dict(),
+        "diag_meter_state_dict": meter.state_dict(),
+        "stepper_state_dict": _capture_stepper_state(stepper),
+        "row": row,
+        "best_metric": best_metric,
+        "topk": topk,
+        "runtime_state": dataclasses.asdict(runtime_state),
+        "rng_snapshot": dataclasses.asdict(rng_snapshot),
+    }
+    return save_training_checkpoint(
         path,
+        payload,
+        metadata={
+            "preset": preset,
+            "global_step": str(global_step),
+            "rng_digest": rng_digest(rng_snapshot),
+        },
     )
+
 
 
 def _update_topk(
@@ -245,6 +355,7 @@ def _update_topk(
     return kept
 
 
+
 def run_overfit(
     *,
     dataset: Path,
@@ -258,7 +369,6 @@ def run_overfit(
     save_checkpoints: bool = True,
     select_metric: str = "loss",
     select_mode: str = "min",
-    # new: resume / early stopping / top-k
     resume_from: Optional[Path] = None,
     topk: int = 1,
     early_stop_metric: Optional[str] = None,
@@ -271,20 +381,30 @@ def run_overfit(
     ema_schedule_kind: str = "constant",
     ema_beta_start: float = 0.99,
     ema_beta_end: float = 0.999,
+    seed: int = 0,
+    dtype_bits: int = 32,
+    microbatch_size: Optional[int] = None,
+    cpu_fallback_on_cuda_oom: bool = True,
+    max_oom_retries: int = 16,
+    sample_limit: int = 4,
+    export_final_artifacts: bool = True,
 ) -> Dict[str, Any]:
-    data = torch.load(dataset, map_location="cpu")
-    src = collate(data["src"][:4])
-    tgt = collate(data["tgt"][:4])
+    dataset = Path(dataset)
+    output_root = Path(output_root)
+    preset_cfg = get_preset(preset)
+    mp_context = choose_multiprocessing_context()
+    determinism = DeterminismConfig(
+        master_seed=seed,
+        multiprocessing_context=mp_context,
+    )
+    environment = configure_determinism(determinism)
+    seed_root = SeedPath(seed).child("run_overfit", preset)
+    rng_registry = RngRegistry()
 
-    cfg = get_preset(preset)
+    src, tgt, dataset_format = _load_overfit_batches(dataset, sample_limit=sample_limit)
 
     dev = torch.device(device)
-    # Decoder/post-bridge channel dim is the raw image channel count.
     c_model = int(src["image"].shape[1])
-
-    # Transform first, then infer the actual encoder channel dim. DOST expands
-    # channels by the number of frequency bands, so using raw C here breaks
-    # S9Layer's internal kernel reshape assumptions.
     transform_fwd = DOST(D=2)
     transform_inv = IDOST(D=2)
     with torch.no_grad():
@@ -294,7 +414,7 @@ def run_overfit(
     model_kwargs = dict(
         transform_fwd=transform_fwd,
         transform_inv=transform_inv,
-        encoder=S9Stack(c_model=enc_c_model, depth=1, spatial_dims=2),
+        encoder=S9Stack(c_model=enc_c_model, depth=1, spatial_dims=2, dtype_idx=dtype_bits),
         c_model=c_model,
         enc_c_model=enc_c_model,
         spatial_dims=2,
@@ -303,35 +423,36 @@ def run_overfit(
         q_dim=c_model,
         num_queries=4,
         decoder_layers=1,
-        pre_bridge_map=cfg.get("pre_bridge_map", "log1p_arsinh"),
-        pre_bridge_channels=cfg.get("pre_bridge_channels", c_model) or c_model,
-        use_zoning=cfg.get("use_zoning", False),
-        zone_names=cfg.get("zone_names", ("content", "structure", "label", "boundary")),
-        semantic_zone_names=cfg.get("semantic_zone_names", ("content", "structure", "boundary")),
-        instance_zone_names=cfg.get("instance_zone_names", ("content", "label", "boundary")),
-        semantic_zone_weights=cfg.get("semantic_zone_weights", None),
-        instance_zone_weights=cfg.get("instance_zone_weights", None),
-        use_zone_prediction=cfg.get("use_zone_prediction", False),
-        zone_pred_edges=cfg.get("zone_pred_edges", ()),
-        use_lrca=cfg.get("use_lrca", False),
-        lrca_rank_shared=cfg.get("lrca_rank_shared", 4),
-        lrca_rank_private=cfg.get("lrca_rank_private", 2),
-        lrca_fmlm_rank=cfg.get("lrca_fmlm_rank", 4),
-        lrca_fmlm_eta=cfg.get("lrca_fmlm_eta", 0.1),
+        dtype_idx=dtype_bits,
+        pre_bridge_map=preset_cfg.get("pre_bridge_map", "log1p_arsinh"),
+        pre_bridge_channels=preset_cfg.get("pre_bridge_channels", c_model) or c_model,
+        use_zoning=preset_cfg.get("use_zoning", False),
+        zone_names=preset_cfg.get("zone_names", ("content", "structure", "label", "boundary")),
+        semantic_zone_names=preset_cfg.get("semantic_zone_names", ("content", "structure", "boundary")),
+        instance_zone_names=preset_cfg.get("instance_zone_names", ("content", "label", "boundary")),
+        semantic_zone_weights=preset_cfg.get("semantic_zone_weights", None),
+        instance_zone_weights=preset_cfg.get("instance_zone_weights", None),
+        use_zone_prediction=preset_cfg.get("use_zone_prediction", False),
+        zone_pred_edges=preset_cfg.get("zone_pred_edges", ()),
+        use_lrca=preset_cfg.get("use_lrca", False),
+        lrca_rank_shared=preset_cfg.get("lrca_rank_shared", 4),
+        lrca_rank_private=preset_cfg.get("lrca_rank_private", 2),
+        lrca_fmlm_rank=preset_cfg.get("lrca_fmlm_rank", 4),
+        lrca_fmlm_eta=preset_cfg.get("lrca_fmlm_eta", 0.1),
     )
     model = FrameSmoothiePanopticModel(**model_kwargs).to(dev)
-    teacher = make_ema_teacher(model)
+    teacher = make_ema_teacher(model).to(dev)
 
     matcher = HungarianMatcher(num_points=256)
     criterion = SetCriterion(num_classes=2, matcher=matcher, num_points=128)
     hmc_kwargs = {"thing_classes": (0, 1), "min_area": 8}
-    hmc_kwargs.update(cfg.get("hmc_kwargs", {}))
+    hmc_kwargs.update(preset_cfg.get("hmc_kwargs", {}))
     hmc = HMCCalibrator(**hmc_kwargs)
     stepper = FrameSmoothieTrainStep(
         criterion_inst=criterion,
         hmc=hmc,
         thing_classes=[0, 1],
-        lambda_pred=cfg.get("lambda_pred", 0.0),
+        lambda_pred=preset_cfg.get("lambda_pred", 0.0),
         pred_detach_target=True,
         use_edge_weights=True,
     )
@@ -340,43 +461,84 @@ def run_overfit(
     ema_scheduler = EmaDecayScheduler(kind=ema_schedule_kind, beta_start=ema_beta_start, beta_end=ema_beta_end, total_steps=steps, last_step=0)
     meter = DiagMeter()
 
-    # run directory / resume
+    runtime_policy = RuntimePolicy(
+        device=str(dev),
+        microbatch_size=microbatch_size,
+        cpu_fallback_on_cuda_oom=cpu_fallback_on_cuda_oom,
+        max_oom_retries=max_oom_retries,
+        empty_cuda_cache_on_retry=True,
+        empty_cuda_cache_every=0,
+        grad_clip_norm=None,
+    )
+    runtime_state = RuntimeState(effective_device=str(dev), microbatch_size=microbatch_size)
+
     if resume_from is not None:
         resume_from = Path(resume_from)
-        ckpt = torch.load(resume_from, map_location=dev)
+        ckpt = load_training_checkpoint(resume_from, device="cpu")
         run_dir = resume_from.parent.parent if resume_from.parent.name == "checkpoints" else resume_from.parent
         model.load_state_dict(ckpt["model_state_dict"])
         teacher.load_state_dict(ckpt["teacher_state_dict"])
+        model.to(dev)
+        teacher.to(dev)
         opt.load_state_dict(ckpt["optimizer_state_dict"])
+        for state in opt.state.values():
+            for key, value in list(state.items()):
+                if isinstance(value, torch.Tensor):
+                    state[key] = value.to(dev)
         if scheduler is not None and ckpt.get("scheduler_state_dict", None) is not None:
             scheduler.load_state_dict(ckpt["scheduler_state_dict"])
         if ckpt.get("diag_meter_state_dict", None) is not None:
             meter.load_state_dict(ckpt["diag_meter_state_dict"])
         if ckpt.get("ema_scheduler_state_dict", None) is not None:
             ema_scheduler.load_state_dict(ckpt["ema_scheduler_state_dict"])
+        if ckpt.get("stepper_state_dict", None) is not None:
+            _restore_stepper_state(stepper, ckpt["stepper_state_dict"])
+        if ckpt.get("runtime_state", None) is not None:
+            runtime_state = RuntimeState(**ckpt["runtime_state"])
         start_step = int(ckpt.get("global_step", ckpt.get("step", 0)))
         best_metric: Optional[float] = ckpt.get("best_metric", None)
         topk_manifest: list[dict[str, Any]] = ckpt.get("topk", [])
         rows: list[dict[str, Any]] = _read_jsonl(run_dir / "metrics.jsonl")
+        runtime_events: list[dict[str, Any]] = _read_jsonl(run_dir / "runtime_events.jsonl")
         resumed_from = str(resume_from)
+
+        rng_snapshot_dict = ckpt.get("rng_snapshot", None)
+        if rng_snapshot_dict is not None:
+            restore_rng_snapshot(
+                snapshot=RngSnapshot(**rng_snapshot_dict),
+                numpy_generators=rng_registry.numpy_generators,
+                torch_generators=rng_registry.torch_generators,
+            )
     else:
         run_dir = _make_run_dir(output_root, preset, run_name)
         start_step = 0
         best_metric = None
         topk_manifest = []
         rows = []
+        runtime_events = []
         resumed_from = None
         config_payload = _to_jsonable({
             "preset": preset,
             "steps": steps,
             "lr": lr,
             "device": device,
+            "dataset": dataset,
+            "dataset_format": dataset_format,
+            "sample_limit": sample_limit,
             "scheduler_kind": scheduler_kind,
             "scheduler_step_size": scheduler_step_size,
             "scheduler_gamma": scheduler_gamma,
             "ema_schedule_kind": ema_schedule_kind,
             "ema_beta_start": ema_beta_start,
             "ema_beta_end": ema_beta_end,
+            "seed": seed,
+            "dtype_bits": dtype_bits,
+            "microbatch_size": microbatch_size,
+            "cpu_fallback_on_cuda_oom": cpu_fallback_on_cuda_oom,
+            "max_oom_retries": max_oom_retries,
+            "determinism": determinism,
+            "runtime_policy": runtime_policy,
+            "environment": environment,
             "model_kwargs": {k: str(v) if k == "zone_pred_edges" else v for k, v in model_kwargs.items()},
         })
         (run_dir / "config.json").write_text(
@@ -389,7 +551,6 @@ def run_overfit(
     if save_checkpoints:
         ckpt_dir.mkdir(parents=True, exist_ok=True)
 
-    # early stopping state (log-event based)
     es_metric_name = early_stop_metric or select_metric
     es_mode = early_stop_mode or select_mode
     es_best: Optional[float] = None
@@ -398,7 +559,6 @@ def run_overfit(
     stopped_step: Optional[int] = None
     best_ckpt: Optional[Path] = Path(topk_manifest[0]["path"]) if topk_manifest else None
 
-    # seed early-stop best from historical rows if resuming
     if rows and early_stop_patience > 0:
         for r in rows:
             v = _select_key(r, es_metric_name)
@@ -410,23 +570,36 @@ def run_overfit(
             else:
                 es_bad_count += 1
 
+    step_fn = _call_train_step(stepper)(model)(teacher)(meter)(False)
+    runtime_env = RuntimeEnv(
+        student=model,
+        teacher=teacher,
+        optimizer=opt,
+        step_fn=step_fn,
+        policy=runtime_policy,
+        diag_meter=meter,
+        capture_ephemeral_state=lambda: _capture_stepper_state(stepper),
+        restore_ephemeral_state=lambda state: _restore_stepper_state(stepper, state),
+    )
+
     for it in range(start_step, steps):
-        opt.zero_grad(set_to_none=True)
-        out = stepper(student=model, teacher=teacher, src=src, tgt=tgt, diag_meter=meter, return_diag=False)
-        loss = out["loss"]
-        loss.backward()
+        runtime_state, (out, runtime_report), program_log = make_step_program(src, tgt).execute(runtime_env, runtime_state)
+        if runtime_policy.grad_clip_norm is not None:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=float(runtime_policy.grad_clip_norm))
         opt.step()
         if scheduler is not None:
             scheduler.step()
         ema_beta = ema_scheduler.step()
         ema_update(teacher, model, beta=ema_beta)
         last_out = out
+        runtime_events.extend(dict(event) for event in program_log.events)
 
         if (it + 1) % log_every == 0 or (it + 1) == steps:
             means = meter.compute_means()
+            current_rng_snapshot = rng_registry.snapshot()
             row = {
                 "step": it + 1,
-                "loss": float(loss.detach().cpu().item()),
+                "loss": float(out["loss"].detach().cpu().item()),
                 "loss_src_sem": float(out["loss_src_sem"].cpu().item()),
                 "loss_src_inst": float(out["loss_src_inst"].cpu().item()),
                 "loss_tgt_sem": float(out["loss_tgt_sem"].cpu().item()),
@@ -437,6 +610,12 @@ def run_overfit(
                 "corr_tgt_student": means.get("tgt_student/corr_sem_inst"),
                 "lr": float(opt.param_groups[0]["lr"]),
                 "ema_beta": float(ema_beta),
+                "effective_device": runtime_report.effective_device,
+                "effective_microbatch_size": int(runtime_report.effective_microbatch_size),
+                "num_microbatches": int(runtime_report.num_microbatches),
+                "oom_retries": int(runtime_report.oom_retries),
+                "cpu_fallback_used": bool(runtime_report.cpu_fallback_used),
+                "rng_digest": rng_digest(current_rng_snapshot),
             }
             rows.append(row)
 
@@ -446,7 +625,7 @@ def run_overfit(
                     best_metric = metric_val
 
             if save_checkpoints:
-                ckpt_path = ckpt_dir / f"step_{it+1:06d}.pt"
+                ckpt_path = ckpt_dir / f"step_{it + 1:06d}.safetensors"
                 topk_manifest = _update_topk(
                     ckpt_path=ckpt_path,
                     metric_val=metric_val,
@@ -455,7 +634,7 @@ def run_overfit(
                     topk_limit=max(1, int(topk)),
                     mode=select_mode,
                 )
-                _save_checkpoint(
+                ckpt_path = _save_checkpoint(
                     ckpt_path,
                     step=it + 1,
                     preset=preset,
@@ -465,20 +644,22 @@ def run_overfit(
                     scheduler=scheduler,
                     ema_scheduler=ema_scheduler,
                     meter=meter,
+                    stepper=stepper,
                     row=row,
                     best_metric=best_metric,
                     topk=topk_manifest,
                     global_step=it + 1,
+                    runtime_state=runtime_state,
+                    rng_registry=rng_registry,
                 )
                 if topk_manifest:
                     best_ckpt = Path(topk_manifest[0]["path"])
-                    best_link = run_dir / "best_checkpoint.pt"
+                    best_link = run_dir / "best_checkpoint.safetensors"
                     if best_ckpt.exists():
                         shutil.copy2(best_ckpt, best_link)
                     manifest_path = run_dir / "topk_checkpoints.json"
                     manifest_path.write_text(json.dumps(topk_manifest, indent=2, ensure_ascii=False), encoding="utf-8")
 
-            # early stopping update
             if early_stop_patience > 0:
                 es_val = _select_key(row, es_metric_name)
                 if es_val is not None:
@@ -491,10 +672,16 @@ def run_overfit(
                             early_stopped = True
                             stopped_step = it + 1
 
+            corr_ref_text = ""
+            if row["corr_ref_src_ema"] is not None:
+                corr_ref_text = f" corr_ref={row['corr_ref_src_ema']:.4f}"
             print(
-                f"[{preset}] step={it+1:04d} "
-                f"loss={row['loss']:.4f} "
-                f"{f"corr_ref={row['corr_ref_src_ema']:.4f}" if row['corr_ref_src_ema'] is not None else ''}"
+                f"[{preset}] step={it + 1:04d} "
+                f"loss={row['loss']:.4f}"
+                f" mb={row['effective_microbatch_size']}"
+                f" dev={row['effective_device']}"
+                f" oom={row['oom_retries']}"
+                f"{corr_ref_text}"
             )
             meter.reset()
 
@@ -504,14 +691,41 @@ def run_overfit(
 
     _write_jsonl(run_dir / "metrics.jsonl", rows)
     _save_metrics_csv(run_dir / "metrics.csv", rows)
+    _write_jsonl(run_dir / "runtime_events.jsonl", runtime_events)
+
+    final_student_artifact = None
+    final_teacher_artifact = None
+    if export_final_artifacts:
+        final_student_artifact = export_state_dict_artifact(
+            run_dir / "student_final.safetensors",
+            model,
+            metadata={
+                "preset": preset,
+                "steps_executed": str(rows[-1]["step"] if rows else start_step),
+                "seed": str(seed),
+            },
+        )
+        final_teacher_artifact = export_state_dict_artifact(
+            run_dir / "teacher_final.safetensors",
+            teacher,
+            metadata={
+                "preset": preset,
+                "steps_executed": str(rows[-1]["step"] if rows else start_step),
+                "seed": str(seed),
+            },
+        )
 
     summary = {
         "preset": preset,
         "run_dir": str(run_dir),
         "steps_requested": steps,
         "steps_executed": rows[-1]["step"] if rows else start_step,
-        "device": device,
+        "device_requested": device,
+        "device_effective": runtime_state.effective_device,
         "resumed_from": resumed_from,
+        "dataset": str(dataset),
+        "dataset_format": dataset_format,
+        "sample_limit": int(sample_limit),
         "scheduler_kind": scheduler_kind,
         "scheduler_step_size": int(scheduler_step_size),
         "scheduler_gamma": float(scheduler_gamma),
@@ -538,10 +752,21 @@ def run_overfit(
         "final_loss_tgt_sem": float(last_out["loss_tgt_sem"].cpu().item()) if last_out else None,
         "final_loss_tgt_inst": float(last_out["loss_tgt_inst"].cpu().item()) if last_out else None,
         "rows_logged": len(rows),
+        "runtime_events_logged": len(runtime_events),
         "final_lr": float(opt.param_groups[0]["lr"]),
+        "seed": int(seed),
+        "dtype_bits": int(dtype_bits),
+        "microbatch_size_requested": microbatch_size,
+        "microbatch_size_effective": runtime_state.last_effective_microbatch_size,
+        "cpu_fallback_on_cuda_oom": bool(cpu_fallback_on_cuda_oom),
+        "oom_events": runtime_state.oom_events,
+        "final_rng_digest": rng_digest(rng_registry.snapshot()),
+        "student_final_artifact": str(final_student_artifact) if final_student_artifact is not None else None,
+        "teacher_final_artifact": str(final_teacher_artifact) if final_teacher_artifact is not None else None,
     }
     (run_dir / "summary.json").write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
     return summary
+
 
 
 def main():
@@ -569,6 +794,13 @@ def main():
     ap.add_argument("--ema-schedule-kind", type=str, default="constant", choices=["constant", "linear", "cosine"])
     ap.add_argument("--ema-beta-start", type=float, default=0.99)
     ap.add_argument("--ema-beta-end", type=float, default=0.999)
+    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--dtype-bits", type=int, default=32, choices=[16, 32, 64])
+    ap.add_argument("--microbatch-size", type=int, default=None)
+    ap.add_argument("--sample-limit", type=int, default=4)
+    ap.add_argument("--no-cpu-fallback-on-cuda-oom", action="store_true")
+    ap.add_argument("--max-oom-retries", type=int, default=16)
+    ap.add_argument("--no-export-final-artifacts", action="store_true")
     args = ap.parse_args()
 
     run_overfit(
@@ -595,6 +827,13 @@ def main():
         ema_schedule_kind=args.ema_schedule_kind,
         ema_beta_start=args.ema_beta_start,
         ema_beta_end=args.ema_beta_end,
+        seed=args.seed,
+        dtype_bits=args.dtype_bits,
+        microbatch_size=args.microbatch_size,
+        cpu_fallback_on_cuda_oom=not args.no_cpu_fallback_on_cuda_oom,
+        max_oom_retries=args.max_oom_retries,
+        sample_limit=args.sample_limit,
+        export_final_artifacts=not args.no_export_final_artifacts,
     )
 
 

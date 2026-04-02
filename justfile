@@ -28,19 +28,19 @@ smoke-train:
 
 toy-data:
     mkdir -p {{artifacts_dir}}
-    {{python}} make_toy_panoptic.py --output {{toy_dataset}} --num-samples 16 --target-style-shift
+    {{python}} -m framesmoothie._scripts.make_toy_panoptic --output {{toy_dataset}} --num-samples 16 --target-style-shift
 
 list-presets:
-    {{python}} -c "from .presets import list_presets; print('\\n'.join(sorted(list_presets())))"
+    {{python}} -c "from framesmoothie._scripts.presets import list_presets; print('\\n'.join(sorted(list_presets())))"
 
 tiny-overfit device="cpu": toy-data
-    {{python}} run_tiny_overfit.py --dataset {{toy_dataset}} --steps 100 --device {{device}}
+    {{python}} -m framesmoothie._scripts.run_tiny_overfit --dataset {{toy_dataset}} --steps 100 --device {{device}}
 
 tiny-overfit-preset preset="pred" device="cpu" steps="100" topk="1" early_stop="" early_metric="" early_mode="" early_delta="" ema_schedule="constant" ema_beta_start="0.99" ema_beta_end="0.999": toy-data
-    {{python}} run_tiny_overfit.py --dataset {{toy_dataset}} --steps {{steps}} --device {{device}} --preset {{preset}} --save-checkpoints --topk {{topk}} {{ if early_stop != "" { "--early-stop-patience " + early_stop } else { "" } }} {{ if early_metric != "" { "--early-stop-metric " + early_metric } else { "" } }} {{ if early_mode != "" { "--early-stop-mode " + early_mode } else { "" } }} {{ if early_delta != "" { "--early-stop-min-delta " + early_delta } else { "" } }} --ema-schedule-kind {{ema_schedule}} --ema-beta-start {{ema_beta_start}} --ema-beta-end {{ema_beta_end}}
+    {{python}} -m framesmoothie._scripts.run_tiny_overfit --dataset {{toy_dataset}} --steps {{steps}} --device {{device}} --preset {{preset}} --save-checkpoints --topk {{topk}} {{ if early_stop != "" { "--early-stop-patience " + early_stop } else { "" } }} {{ if early_metric != "" { "--early-stop-metric " + early_metric } else { "" } }} {{ if early_mode != "" { "--early-stop-mode " + early_mode } else { "" } }} {{ if early_delta != "" { "--early-stop-min-delta " + early_delta } else { "" } }} --ema-schedule-kind {{ema_schedule}} --ema-beta-start {{ema_beta_start}} --ema-beta-end {{ema_beta_end}}
 
 tiny-overfit-suite device="cpu" steps="100" topk="1" early_stop="" early_metric="" early_mode="" early_delta="" ema_schedule="constant" ema_beta_start="0.99" ema_beta_end="0.999": toy-data
-    {{python}} run_preset_suite.py --dataset {{toy_dataset}} --steps {{steps}} --device {{device}} --presets baseline zoning pred full full_lite_instance_friendly full_lite_target_instance_friendly full_lite_target_instance_friendly_v3 full_lite_target_instance_friendly_v4 --save-checkpoints --topk {{topk}} {{ if early_stop != "" { "--early-stop-patience " + early_stop } else { "" } }} {{ if early_metric != "" { "--early-stop-metric " + early_metric } else { "" } }} {{ if early_mode != "" { "--early-stop-mode " + early_mode } else { "" } }} {{ if early_delta != "" { "--early-stop-min-delta " + early_delta } else { "" } }} --ema-schedule-kind {{ema_schedule}} --ema-beta-start {{ema_beta_start}} --ema-beta-end {{ema_beta_end}}
+    {{python}} -m framesmoothie._scripts.run_preset_suite --dataset {{toy_dataset}} --steps {{steps}} --device {{device}} --presets baseline zoning pred full full_lite_instance_friendly full_lite_target_instance_friendly full_lite_target_instance_friendly_v3 full_lite_target_instance_friendly_v4 --save-checkpoints --topk {{topk}} {{ if early_stop != "" { "--early-stop-patience " + early_stop } else { "" } }} {{ if early_metric != "" { "--early-stop-metric " + early_metric } else { "" } }} {{ if early_mode != "" { "--early-stop-mode " + early_mode } else { "" } }} {{ if early_delta != "" { "--early-stop-min-delta " + early_delta } else { "" } }} --ema-schedule-kind {{ema_schedule}} --ema-beta-start {{ema_beta_start}} --ema-beta-end {{ema_beta_end}}
 
 plots device="cpu": tiny-overfit-suite {{device}}
 
@@ -48,8 +48,8 @@ diagnostics:
     @echo "See docs/TESTING_GUIDE.md and docs/DIAGNOSTICS_VISUALIZATION.md"
 
 plot-suite suite_dir:
-    {{python}} plot_suite_summary.py --suite-dir {{suite_dir}}
+    {{python}} -m framesmoothie._scripts.plot_suite_summary --suite-dir {{suite_dir}}
 
 
 tiny-overfit-resume resume preset="pred" device="cpu" steps="100" topk="1" early_stop="" early_metric="" early_mode="" early_delta="" ema_schedule="constant" ema_beta_start="0.99" ema_beta_end="0.999":
-    {{python}} run_tiny_overfit.py --dataset {{toy_dataset}} --preset {{preset}} --steps {{steps}} --device {{device}} --resume-from {{resume}} --save-checkpoints --topk {{topk}} {{ if early_stop != "" { "--early-stop-patience " + early_stop } else { "" } }} {{ if early_metric != "" { "--early-stop-metric " + early_metric } else { "" } }} {{ if early_mode != "" { "--early-stop-mode " + early_mode } else { "" } }} {{ if early_delta != "" { "--early-stop-min-delta " + early_delta } else { "" } }} --ema-schedule-kind {{ema_schedule}} --ema-beta-start {{ema_beta_start}} --ema-beta-end {{ema_beta_end}}
+    {{python}} -m framesmoothie._scripts.run_tiny_overfit --dataset {{toy_dataset}} --preset {{preset}} --steps {{steps}} --device {{device}} --resume-from {{resume}} --save-checkpoints --topk {{topk}} {{ if early_stop != "" { "--early-stop-patience " + early_stop } else { "" } }} {{ if early_metric != "" { "--early-stop-metric " + early_metric } else { "" } }} {{ if early_mode != "" { "--early-stop-mode " + early_mode } else { "" } }} {{ if early_delta != "" { "--early-stop-min-delta " + early_delta } else { "" } }} --ema-schedule-kind {{ema_schedule}} --ema-beta-start {{ema_beta_start}} --ema-beta-end {{ema_beta_end}}

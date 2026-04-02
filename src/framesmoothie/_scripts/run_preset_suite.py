@@ -12,9 +12,9 @@ from typing import Any, Dict, List
 import matplotlib.pyplot as plt
 import pandas as pd
 
-ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 from framesmoothie._scripts.run_tiny_overfit import run_overfit
 from framesmoothie._scripts.presets import list_presets
@@ -44,6 +44,13 @@ def main():
     ap.add_argument("--ema-schedule-kind", type=str, default="constant", choices=["constant", "linear", "cosine"])
     ap.add_argument("--ema-beta-start", type=float, default=0.99)
     ap.add_argument("--ema-beta-end", type=float, default=0.999)
+    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--dtype-bits", type=int, default=32, choices=[16, 32, 64])
+    ap.add_argument("--microbatch-size", type=int, default=None)
+    ap.add_argument("--sample-limit", type=int, default=4)
+    ap.add_argument("--no-cpu-fallback-on-cuda-oom", action="store_true")
+    ap.add_argument("--max-oom-retries", type=int, default=16)
+    ap.add_argument("--no-export-final-artifacts", action="store_true")
     args = ap.parse_args()
 
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -77,6 +84,13 @@ def main():
             ema_schedule_kind=args.ema_schedule_kind,
             ema_beta_start=args.ema_beta_start,
             ema_beta_end=args.ema_beta_end,
+            seed=args.seed,
+            dtype_bits=args.dtype_bits,
+            microbatch_size=args.microbatch_size,
+            cpu_fallback_on_cuda_oom=not args.no_cpu_fallback_on_cuda_oom,
+            max_oom_retries=args.max_oom_retries,
+            sample_limit=args.sample_limit,
+            export_final_artifacts=not args.no_export_final_artifacts,
         )
         summaries.append(summary)
 

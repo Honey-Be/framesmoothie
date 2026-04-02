@@ -1455,7 +1455,7 @@ description = ""
 optional = true
 python-versions = ">=3.12,<3.15"
 groups = ["main"]
-markers = "extra == \"cpu\" and extra != \"cu126\" and extra != \"cu128\" and extra != \"cu130\" or extra != \"cpu\" and extra == \"cu126\" and extra != \"cu128\" and extra != \"cu130\" or extra != \"cpu\" and extra != \"cu126\" and extra == \"cu128\" and extra != \"cu130\" or extra != \"cpu\" and extra != \"cu126\" and extra != \"cu128\" and extra == \"cu130\""
+markers = "extra == \"cpu\" and extra != \"cu126\" and extra != \"cu128\" and extra != \"cu130\" or extra == \"cu126\" and extra != \"cpu\" and extra != \"cu128\" and extra != \"cu130\" or extra == \"cu128\" and extra != \"cpu\" and extra != \"cu126\" and extra != \"cu130\" or extra == \"cu130\" and extra != \"cpu\" and extra != \"cu126\" and extra != \"cu128\""
 files = []
 develop = false
 
@@ -1524,12 +1524,12 @@ files = [
 ]
 
 [extras]
-cpu = ["s9", "s9", "s9", "s9", "torch", "torch", "torch", "torch"]
-cu126 = ["s9", "s9", "s9", "s9", "torch", "torch", "torch", "torch"]
-cu128 = ["s9", "s9", "s9", "s9", "torch", "torch", "torch", "torch"]
-cu130 = ["s9", "s9", "s9", "s9", "torch", "torch", "torch", "torch"]
+cpu = ["s9", "s9", "s9", "s9", "torch", "torch", "torch", "torch", "torchutils", "torchutils", "torchutils", "torchutils"]
+cu126 = ["s9", "s9", "s9", "s9", "torch", "torch", "torch", "torch", "torchutils", "torchutils", "torchutils", "torchutils"]
+cu128 = ["s9", "s9", "s9", "s9", "torch", "torch", "torch", "torch", "torchutils", "torchutils", "torchutils", "torchutils"]
+cu130 = ["s9", "s9", "s9", "s9", "torch", "torch", "torch", "torch", "torchutils", "torchutils", "torchutils", "torchutils"]
 
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.12, <3.15"
-content-hash = "143d829c3639bf8709ea1076de99a199a395d4e3de3a1ba87709c1bdd955c2b5"
+content-hash = "d1c4966b7dae12edc373002bb5013121844173a8d3f5858405924397a88b24c6"
