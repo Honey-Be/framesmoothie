@@ -12,7 +12,8 @@ except Exception:  # pragma: no cover
 from s9.rs9_modules import RS9Layer
 from s9.base import FPDTypeIdx, get_float_dtype
 
-from framesmoothie.base import StabilizedActivationFunctionBase, StabilizedBiasedActivationFunctionBase, auxloss
+from torchutils.decorators import auxloss
+from framesmoothie.base import StabilizedActivationFunctionBase, StabilizedBiasedActivationFunctionBase
 
 class HybridVeLU(StabilizedActivationFunctionBase):
     def __init__(self, features: int, eps: float = 1e-6, dtype_idx: FPDTypeIdx = 64, *, alpha: float = 0.1, beta1: float = 0.1, beta2: float = 0.1, gamma: float = 0.1, momentum: float = 0.9, 

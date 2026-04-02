@@ -12,8 +12,8 @@ try:
 except Exception:  # pragma: no cover
     from typing_extensions import override, Tuple, Optional, Dict, Any, Callable
 
-
-from framesmoothie.base import StabilizedActivationFunctionBase, auxloss
+from torchutils.decorators import auxloss
+from framesmoothie.base import StabilizedActivationFunctionBase
 from framesmoothie.activations import BiasedTeLU
 from framesmoothie.fmlm import FMLMFiLM
 from framesmoothie.adapters.base import ModuleAdapterBase
