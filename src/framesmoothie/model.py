@@ -17,6 +17,7 @@ from framesmoothie.predictor import ZonePredictiveGraph, ZoneEdgeSpec
 
 from s9.base import FPDTypeIdx, get_float_dtype
 from s9.rs9_modules import RS9Layer
+from s9._common.kernel_base import InitMode, Discretization
 from s9.activations.real.hglu import HGLU
 
 from s9.activations.complex.stable_cardioid import StableComplexCardioid
@@ -103,6 +104,8 @@ class S9Stack(nn.Module):
         eps: float = 1e-6,
         dtype_idx: FPDTypeIdx = 64,
         gen_activation: Callable[[int, float, FPDTypeIdx], nn.Module] = StableComplexCardioid,
+        init_mode: InitMode = "legacy",
+        discretization: Discretization = "zoh",
     ):
         super().__init__()
         self.c_model = c_model
@@ -117,6 +120,8 @@ class S9Stack(nn.Module):
                 gen_activation=self.gen_activation,
                 eps=self.eps,
                 dtype_idx=self.dtype_idx,
+                init_mode=init_mode,
+                discretization=discretization,
             )
             for _ in range(self.depth)
         ])

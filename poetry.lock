@@ -1105,7 +1105,7 @@ dev = ["argcomplete", "attrs (>=19.2)", "hypothesis (>=3.56)", "mock", "requests
 
 [[package]]
 name = "s9"
-version = "0.3.0"
+version = "0.4.0"
 description = "S9/RS9: Multidimensional SSM based on S4ND + S7 Fusion"
 optional = true
 python-versions = ">=3.12, <3.15"
@@ -1132,8 +1132,8 @@ cu130 = ["torch (==2.10.0+cpu)", "torch (==2.10.0+cu126)", "torch (==2.10.0+cu12
 [package.source]
 type = "git"
 url = "https://github.com/Honey-Be/s9.git"
-reference = "v0.3.0"
-resolved_reference = "86001373ea97092ffc3e7aa26b05e3d2abe5371b"
+reference = "v0.4.0"
+resolved_reference = "6ea4ee451d63af0613cc2a27023fa67c100e8e32"
 
 [[package]]
 name = "setuptools"
@@ -1532,4 +1532,4 @@ cu130 = ["s9", "s9", "s9", "s9", "torch", "torch", "torch", "torch", "torchutils
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.12, <3.15"
-content-hash = "21827934e0fc70b5a1506b3ff3c89d498b19e34ca2e33b68d021fcd1bd221b0b"
+content-hash = "071c4ccc6299a55a10a676f347562a2881a160a15231020edf30f19939db5dfe"

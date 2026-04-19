@@ -1,21 +1,28 @@
+"""QRS9 decoder layers (mirror of RS9DecoderLayer / RS9Decoder).
+
+Uses QRS9CondMixBlock for the cross-attention-free mixing step.
+"""
+
 import torch
 import torch.nn as nn
 from typing import Optional, Dict, Any, List, Callable, Tuple
 
-from framesmoothie.blocks import RS9CondMixBlock
+from framesmoothie.blocks_qrs9 import QRS9CondMixBlock
 from framesmoothie.base import StabilizedActivationFunctionBase
 from framesmoothie.activations import BiasedTeLU
 from framesmoothie.adapters.base import ModuleAdapterBase
 from s9.activations.real.hglu import HGLU
-from s9.rs9_modules import RS9Layer
+from s9.qrs9_modules import QRS9Layer
+from s9.quantization.bit_budget import QuantConfig
 from s9.base import FPDTypeIdx
 from s9._common.kernel_base import InitMode, Discretization
 from framesmoothie.ffn_backends import FFNBase, create_ffn
 
-class RS9DecoderLayer(nn.Module):
+
+class QRS9DecoderLayer(nn.Module):
     """
-    One decoder layer:
-      q -> RS9CondMixBlock(x, q) -> q'
+    One QRS9 decoder layer:
+      q -> QRS9CondMixBlock(x, q) -> q'
       optional: extra FFN on q (slot-wise)
     """
     def __init__(
@@ -24,34 +31,30 @@ class RS9DecoderLayer(nn.Module):
         c_model: int,
         q_dim: int,
         spatial_dims: int,
-        # RS9CondMixBlock params
         gate_dim: int = 64,
         v_dim: Optional[int] = None,
         ffn_mult: int = 4,
         dropout: float = 0.0,
         eps: float = 1e-6,
-        rs9_eps: float = 1e-6,
+        qrs9_eps: float = 1e-6,
         return_masks: bool = True,
-        rs9: Optional[RS9Layer] = None,
+        qrs9: Optional[QRS9Layer] = None,
         gen_activation: Callable[[int, float, FPDTypeIdx], StabilizedActivationFunctionBase] = BiasedTeLU,
         dtype_idx: FPDTypeIdx = 64,
         lambda_gate_entropy: float = 0.0,
         lambda_gate_competition: float = 0.0,
-        # adapter
         adapter: Optional[ModuleAdapterBase] = None,
-        # extra slot FFN (post)
         post_ffn: bool = True,
         post_ffn_mult: int = 4,
-        # pluggable FFN backend
         ffn_backend: Optional[str] = None,
         ffn_kwargs: Optional[Dict[str, Any]] = None,
-        # s9 v0.4.0 kwargs
         init_mode: InitMode = "legacy",
         discretization: Discretization = "zoh",
+        quant_config: QuantConfig = QuantConfig(),
     ):
         super().__init__()
 
-        self.cross = RS9CondMixBlock(
+        self.cross = QRS9CondMixBlock(
             c_model=c_model,
             q_dim=q_dim,
             spatial_dims=spatial_dims,
@@ -60,9 +63,9 @@ class RS9DecoderLayer(nn.Module):
             ffn_mult=ffn_mult,
             dropout=dropout,
             eps=eps,
-            rs9_eps=rs9_eps,
+            qrs9_eps=qrs9_eps,
             return_masks=return_masks,
-            rs9=rs9,
+            qrs9=qrs9,
             gen_activation=gen_activation,
             dtype_idx=dtype_idx,
             lambda_gate_entropy=lambda_gate_entropy,
@@ -72,6 +75,7 @@ class RS9DecoderLayer(nn.Module):
             ffn_kwargs=ffn_kwargs,
             init_mode=init_mode,
             discretization=discretization,
+            quant_config=quant_config,
         )
 
         self.post_ffn_enabled = post_ffn
@@ -101,13 +105,6 @@ class RS9DecoderLayer(nn.Module):
             self.q_ffn = None
 
     def forward(self, x: torch.Tensor, q: torch.Tensor) -> Dict[str, torch.Tensor]:
-        """
-        x: [B,*S,C]
-        q: [B,K,Dq]
-        returns:
-          q: [B,K,Dq]
-          mask_logits (optional): [B,K,*S]
-        """
         out = self.cross(x, q)
         q = out["q"]
 
@@ -119,15 +116,15 @@ class RS9DecoderLayer(nn.Module):
         return out
 
 
-class RS9Decoder(nn.Module):
+class QRS9Decoder(nn.Module):
     """
-    Stack of RS9DecoderLayer.
+    Stack of QRS9DecoderLayer.
 
     Returns:
       - final q
       - list of mask_logits per layer (if return_masks=True)
     """
-    def __init__(self, layers: List[RS9DecoderLayer]):
+    def __init__(self, layers: List[QRS9DecoderLayer]):
         super().__init__()
         self.layers = nn.ModuleList(layers)
 

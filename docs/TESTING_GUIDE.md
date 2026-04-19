@@ -1,6 +1,8 @@
-# Framesmoothie rev5 Testing Guide
+# Framesmoothie v0.4.0 Testing Guide
 
 이 문서는 현재 코드베이스에서 **실전 검증을 시작하기 위한 최소 테스트 루틴**을 정리한다.
+
+> **v0.4.0 변경사항**: s9 v0.4.0 업그레이드에 따라 ARS9 파생 블록, Q 계열(양자화) 파생 블록, 체크포인트 마이그레이션 테스트가 추가되었다. 자세한 내용은 `docs/MIGRATION_v0.4.0.md` 와 `docs/LAYER_GUIDE.md`를 참조한다.
 
 
 ## 0) 자동 실행 러너
@@ -80,13 +82,34 @@ python -m framesmoothie._scripts.run_tiny_overfit --dataset artifacts/toy_panopt
 - `tgt_teacher/corr_sem_inst`
 - `tgt_student/corr_sem_inst`
 
-## 7) 주의
+## 7) v0.4.0 신규 테스트
+
+### ARS9 블록 테스트
+```bash
+pytest -q tests/test_ars9_blocks.py
+```
+ARS9CondMixBlock / ARS9DecoderLayer / ARS9Decoder 의 1D/2D forward + HiPPO-N 초기화를 검증한다.
+
+### 양자화 블록 테스트
+```bash
+pytest -q tests/test_quantization_blocks.py
+```
+QRS9CondMixBlock / QARS9CondMixBlock 및 해당 Decoder stack 의 forward/backward, STE gradient 흐름, HiPPO-N+양자화 조합을 검증한다.
+
+### 체크포인트 마이그레이션 테스트
+```bash
+pytest -q tests/test_migration.py
+```
+v0.3.x (approx 이산화) → v0.4.0 (exact ZOH) 전환 시 RS9/ARS9 블록의 forward 동치성, roundtrip lossless, 중첩 dict 체크포인트 지원을 검증한다.
+
+## 8) 주의
 
 - `tests/test_zoning.py`, `tests/test_model_smoke.py`, `tests/test_smoke_train.py`, `tests/test_gradcheck_fmlm.py`는 `s9`가 설치되지 않으면 자동 skip되도록 작성했다.
+- `tests/test_ars9_blocks.py`, `tests/test_quantization_blocks.py`, `tests/test_migration.py` 도 동일하게 `s9` v0.4.0이 필요하다.
 - DDP 검증은 현재 `DiagMeter.sync()`를 직접 호출하는 별도 스크립트/실험 루프에서 확인하는 것을 권장한다.
 
 
-## 8) preset별 실행 / 로그 디렉토리 / 결과 요약
+## 9) preset별 실행 / 로그 디렉토리 / 결과 요약
 
 ### 단일 preset 실행
 ```bash
