@@ -186,6 +186,11 @@ class FrameSmoothiePanopticModel(nn.Module):
         lrca_domain_dim: int = 1,
         lrca_task_id_dim: int = 1,
         return_diag_default: bool = False,
+        # pluggable FFN backend
+        ffn_backend: Optional[str] = None,
+        ffn_kwargs: Optional[Dict[str, Any]] = None,
+        # RS9 layer factory for decoder (returns RS9Layer-compatible module)
+        rs9_factory: Optional[Callable[[int], nn.Module]] = None,
         # pre-bridge projector (optional)
         pre_bridge_map: Optional[str | PreBridgeMapSpec] = None,
         pre_bridge_channels: Optional[int] = None,
@@ -282,6 +287,7 @@ class FrameSmoothiePanopticModel(nn.Module):
         # decoder stack
         layers = []
         for _ in range(decoder_layers):
+            rs9_layer = rs9_factory(c_model) if rs9_factory is not None else None
             layers.append(RS9DecoderLayer(
                 c_model=c_model,
                 q_dim=q_dim,
@@ -293,12 +299,14 @@ class FrameSmoothiePanopticModel(nn.Module):
                 eps=eps,
                 rs9_eps=rs9_eps,
                 return_masks=True,
-                rs9=None,
+                rs9=rs9_layer,
                 dtype_idx=dtype_idx,
                 lambda_gate_entropy=lambda_gate_entropy,
                 lambda_gate_competition=lambda_gate_competition,
                     adapter=self.adapter,
                 post_ffn=True,
+                ffn_backend=ffn_backend,
+                ffn_kwargs=ffn_kwargs,
             ))
         self.decoder = RS9Decoder(layers)
 

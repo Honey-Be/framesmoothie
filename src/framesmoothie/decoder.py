@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from typing import Optional, Dict, Any, List, Callable
+from typing import Optional, Dict, Any, List, Callable, Tuple
 
 from framesmoothie.blocks import RS9CondMixBlock
 from framesmoothie.base import StabilizedActivationFunctionBase
@@ -9,6 +9,7 @@ from framesmoothie.adapters.base import ModuleAdapterBase
 from s9.activations.real.hglu import HGLU
 from s9.rs9_modules import RS9Layer
 from s9.base import FPDTypeIdx
+from framesmoothie.ffn_backends import FFNBase, create_ffn
 
 class RS9DecoderLayer(nn.Module):
     """
@@ -40,6 +41,9 @@ class RS9DecoderLayer(nn.Module):
         # extra slot FFN (post)
         post_ffn: bool = True,
         post_ffn_mult: int = 4,
+        # pluggable FFN backend
+        ffn_backend: Optional[str] = None,
+        ffn_kwargs: Optional[Dict[str, Any]] = None,
     ):
         super().__init__()
 
@@ -59,19 +63,33 @@ class RS9DecoderLayer(nn.Module):
             dtype_idx=dtype_idx,
             lambda_gate_entropy=lambda_gate_entropy,
             lambda_gate_competition=lambda_gate_competition,
-            adapter=adapter
+            adapter=adapter,
+            ffn_backend=ffn_backend,
+            ffn_kwargs=ffn_kwargs,
         )
 
         self.post_ffn_enabled = post_ffn
         if post_ffn:
             self.q_ln = nn.LayerNorm(q_dim)
-            self.q_ffn = nn.Sequential(
-                nn.Linear(q_dim, post_ffn_mult * q_dim),
-                HGLU(4.0),
-                nn.Dropout(dropout),
-                nn.Linear(post_ffn_mult * q_dim, q_dim),
-                nn.Dropout(dropout),
-            )
+            if ffn_backend is not None:
+                _fkw = ffn_kwargs or {}
+                self.q_ffn: nn.Module = create_ffn(
+                    ffn_backend,
+                    in_dim=q_dim,
+                    out_dim=q_dim,
+                    hidden_mult=post_ffn_mult,
+                    dropout=dropout,
+                    dtype_idx=dtype_idx,
+                    **_fkw,
+                )
+            else:
+                self.q_ffn = nn.Sequential(
+                    nn.Linear(q_dim, post_ffn_mult * q_dim),
+                    HGLU(4.0),
+                    nn.Dropout(dropout),
+                    nn.Linear(post_ffn_mult * q_dim, q_dim),
+                    nn.Dropout(dropout),
+                )
         else:
             self.q_ln = None
             self.q_ffn = None

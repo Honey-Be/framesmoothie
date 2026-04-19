@@ -17,6 +17,7 @@ from framesmoothie.base import StabilizedActivationFunctionBase
 from framesmoothie.activations import BiasedTeLU
 from framesmoothie.fmlm import FMLMFiLM
 from framesmoothie.adapters.base import ModuleAdapterBase
+from framesmoothie.ffn_backends import FFNBase, create_ffn
 
 
 def _to_channel_first(x: torch.Tensor) -> torch.Tensor:
@@ -141,6 +142,8 @@ class RS9CondMixBlock(nn.Module):
         lambda_gate_entropy: float = 0.0,
         lambda_gate_competition: float = 0.0,
         adapter: Optional[ModuleAdapterBase] = None,
+        ffn_backend: Optional[str] = None,
+        ffn_kwargs: Optional[Dict[str, Any]] = None,
     ):
         super().__init__()
         self.rs9: RS9Layer = rs9 if rs9 is not None else RS9Layer(
@@ -171,13 +174,25 @@ class RS9CondMixBlock(nn.Module):
 
         # Query update: LN + FFN
         self.ln = nn.LayerNorm(self.v_dim, dtype=self.dtype)
-        self.ffn = nn.Sequential(
-            nn.Linear(self.v_dim, ffn_mult * self.v_dim, dtype=self.dtype),
-            HGLU(4.0),
-            nn.Dropout(dropout),
-            nn.Linear(ffn_mult * self.v_dim, q_dim, dtype=self.dtype),
-            nn.Dropout(dropout),
-        )
+        if ffn_backend is not None:
+            _fkw = ffn_kwargs or {}
+            self.ffn: nn.Module = create_ffn(
+                ffn_backend,
+                in_dim=self.v_dim,
+                out_dim=q_dim,
+                hidden_mult=ffn_mult,
+                dropout=dropout,
+                dtype_idx=dtype_idx,
+                **_fkw,
+            )
+        else:
+            self.ffn = nn.Sequential(
+                nn.Linear(self.v_dim, ffn_mult * self.v_dim, dtype=self.dtype),
+                HGLU(4.0),
+                nn.Dropout(dropout),
+                nn.Linear(ffn_mult * self.v_dim, q_dim, dtype=self.dtype),
+                nn.Dropout(dropout),
+            )
 
         # Adapter hooks (optional): adapt selected Linear layers
         if self.adapter is not None:
@@ -188,8 +203,16 @@ class RS9CondMixBlock(nn.Module):
             self.vx = self.adapter.wrap_linear(self.vx, task="instance")
             self.vh = self.adapter.wrap_linear(self.vh, task="instance")
 
-            self.ffn[0] = self.adapter.wrap_linear(self.ffn[0], task="instance")
-            self.ffn[3] = self.adapter.wrap_linear(self.ffn[3], task="instance")
+            if isinstance(self.ffn, FFNBase):
+                for attr_path, linear in self.ffn.wrappable_linears():
+                    parts = attr_path.split(".")
+                    parent = self.ffn
+                    for p in parts[:-1]:
+                        parent = getattr(parent, p) if not p.isdigit() else parent[int(p)]
+                    setattr(parent, parts[-1], self.adapter.wrap_linear(linear, task="instance"))
+            else:
+                self.ffn[0] = self.adapter.wrap_linear(self.ffn[0], task="instance")
+                self.ffn[3] = self.adapter.wrap_linear(self.ffn[3], task="instance")
 
         self._reg_loss: torch.Tensor = torch.tensor(0.0, dtype = self.dtype)
         self.lambda_gate_entropy: float = lambda_gate_entropy
