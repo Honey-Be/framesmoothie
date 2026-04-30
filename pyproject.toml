@@ -44,10 +44,10 @@ torch = [
     {version = "2.10.0+cu130", source = "pytorch-cu130", markers = "extra!='cpu' and extra!='cu126' and extra!='cu128' and extra=='cu130'"}
 ]
 s9 = [
-    {git = "https://github.com/Honey-Be/s9.git", rev = "v0.6.0", extras = ["cpu", "h9"], markers = "extra=='cpu' and extra!='cu126' and extra!='cu128' and extra!='cu130'"},
-    {git = "https://github.com/Honey-Be/s9.git", rev = "v0.6.0", extras = ["cu126", "h9"], markers = "extra!='cpu' and extra=='cu126' and extra!='cu128' and extra!='cu130'"},
-    {git = "https://github.com/Honey-Be/s9.git", rev = "v0.6.0", extras = ["cu128", "h9"], markers = "extra!='cpu' and extra!='cu126' and extra=='cu128' and extra!='cu130'"},
-    {git = "https://github.com/Honey-Be/s9.git", rev = "v0.6.0", extras = ["cu130", "h9"], markers = "extra!='cpu' and extra!='cu126' and extra!='cu128' and extra=='cu130'"}
+    {git = "https://github.com/Honey-Be/s9.git", rev = "v0.6.1", extras = ["cpu", "h9"], markers = "extra=='cpu' and extra!='cu126' and extra!='cu128' and extra!='cu130'"},
+    {git = "https://github.com/Honey-Be/s9.git", rev = "v0.6.1", extras = ["cu126", "h9"], markers = "extra!='cpu' and extra=='cu126' and extra!='cu128' and extra!='cu130'"},
+    {git = "https://github.com/Honey-Be/s9.git", rev = "v0.6.1", extras = ["cu128", "h9"], markers = "extra!='cpu' and extra!='cu126' and extra=='cu128' and extra!='cu130'"},
+    {git = "https://github.com/Honey-Be/s9.git", rev = "v0.6.1", extras = ["cu130", "h9"], markers = "extra!='cpu' and extra!='cu126' and extra!='cu128' and extra=='cu130'"}
 ]
 torchutils = [
     {git = "https://github.com/newsniper-org/torchutils", rev = "v0.1.1", extras = ["cpu"], markers = "extra=='cpu' and extra!='cu126' and extra!='cu128' and extra!='cu130'"},
