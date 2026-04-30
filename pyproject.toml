@@ -1,6 +1,6 @@
 [project]
 name = "framesmoothie"
-version = "0.5.0"
+version = "0.5.1"
 description = "Panoptic segmentation model based on S9. Primarily developed for lossy preprocessing, but now general-purpose"
 authors = [
     {name = "윤병익",email = "yeun0908@gmail.com"}
