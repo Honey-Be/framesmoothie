@@ -31,12 +31,18 @@ from typing import Literal
 import torch
 from torch import Tensor, nn
 
-from s9.h9 import HSSBlock
+try:
+    # Wheel-installed: s9 v0.6.0 maps src/h9 → s9/h9
+    from s9.h9.hss_block import HSSBlock
+except ModuleNotFoundError:
+    # Editable install: src/h9 is exposed as the top-level `h9` package
+    from h9.hss_block import HSSBlock
 from ypsilon_torch import FPDTypeIdx
 from ypsilon_torch.blocks.transforms.real_complex.warped_dost import (
     InverseWarpedDOST,
     WarpedDOST,
 )
+from ypsilon_torch.blocks.activations.complex import StableModReLU
 
 
 class _H9EncoderFitter:
@@ -97,10 +103,10 @@ class H9Encoder(nn.Module):
         self,
         d_model: int,
         n_layers: int,
-        n_per_axis: int = 2,
+        n_per_axis: int = 4,
         spatial_dims: int = 2,
-        gen_activation: type[nn.Module] | None = None,
-        gen_gate_activation: type[nn.Module] | None = None,
+        gen_activation: Callable[[int, float, FPDTypeIdx], ComplexActivationFunctionBase] = StableModReLU,
+        gen_gate_activation: Callable[[], nn.Module] = nn.Sigmoid,
         d_ff_mult: int = 4,
         init_mode: Literal["gaussian"] = "gaussian",
         dropout: float = 0.0,
